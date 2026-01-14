@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amplifier-bundle-foreman"
+version = "1.0.0"
+description = "Conversational autonomous work orchestration bundle for Amplifier"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Amplifier Team" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "amplifier-core>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[project.entry-points."amplifier.modules"]
+orchestrator-foreman = "amplifier_bundle_foreman:mount"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/amplifier_bundle_foreman"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["amplifier_bundle_foreman"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.pyright]
+typeCheckingMode = "basic"
+reportMissingImports = true
+reportMissingTypeStubs = false
+pythonVersion = "3.10"
