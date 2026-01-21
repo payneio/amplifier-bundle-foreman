@@ -1,0 +1,9 @@
+[project]
+name = "sample-project"
+version = "0.1.0"
+description = "Sample project for foreman integration testing"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
