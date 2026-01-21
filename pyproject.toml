@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "amplifier-bundle-foreman"
+name = "amplifier-module-orchestrator-foreman"
 version = "1.0.0"
-description = "Conversational autonomous work orchestration bundle for Amplifier"
+description = "Conversational autonomous work orchestration module for Amplifier"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
@@ -24,10 +24,10 @@ dev = [
 ]
 
 [project.entry-points."amplifier.modules"]
-orchestrator-foreman = "amplifier_bundle_foreman:mount"
+orchestrator-foreman = "amplifier_module_orchestrator_foreman:mount"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/amplifier_bundle_foreman"]
+packages = ["src/amplifier_module_orchestrator_foreman"]
 
 [tool.ruff]
 line-length = 100
@@ -48,7 +48,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["amplifier_bundle_foreman"]
+known-first-party = ["amplifier_module_orchestrator_foreman"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

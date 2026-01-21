@@ -7,10 +7,12 @@ background worker execution.
 """
 
 import asyncio
+import logging
 from typing import Any
 
-from amplifier_core import AmplifierSession, HookRegistry
-from amplifier_foundation import load_bundle
+from amplifier_core import HookRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class ForemanOrchestrator:
@@ -33,6 +35,10 @@ class ForemanOrchestrator:
         self._reported_completions: set[str] = set()
         self._reported_blockers: set[str] = set()
 
+        # Set during execute() for worker spawning
+        self._coordinator: Any = None
+        self._agent_configs: dict[str, dict] | None = None
+
     async def execute(
         self,
         prompt: str,
@@ -40,6 +46,7 @@ class ForemanOrchestrator:
         providers: dict[str, Any],
         tools: dict[str, Any],
         hooks: HookRegistry,
+        coordinator=None,  # Required by AmplifierSession for hook result processing
     ) -> str:
         """
         Main orchestrator entry point.
@@ -60,7 +67,10 @@ class ForemanOrchestrator:
         Returns:
             Response message to user
         """
-        issue_tool = tools.get("issue")
+        # Store coordinator for worker spawning
+        self._coordinator = coordinator
+
+        issue_tool = tools.get("issue_manager")
 
         if not issue_tool:
             return "⚠️  Foreman requires 'issue' tool to be available."
@@ -81,9 +91,7 @@ class ForemanOrchestrator:
             response_parts.append(msg)
 
         # Step 4: Process user's current request
-        request_response = await self._process_request(
-            prompt, issue_tool, context, providers
-        )
+        request_response = await self._process_request(prompt, issue_tool, context, providers)
         if request_response:
             response_parts.append(request_response)
 
@@ -105,7 +113,7 @@ class ForemanOrchestrator:
         """
         # Get recently completed issues
         completed_result = await issue_tool.execute(
-            {"operation": "list", "filter": {"status": "completed"}}
+            {"operation": "list", "params": {"status": "completed"}}
         )
         completed = completed_result.output.get("issues", [])
 
@@ -120,7 +128,7 @@ class ForemanOrchestrator:
 
         # Get blocked issues
         blocked_result = await issue_tool.execute(
-            {"operation": "list", "filter": {"status": "pending_user_input"}}
+            {"operation": "list", "params": {"status": "pending_user_input"}}
         )
         blocked = blocked_result.output.get("issues", [])
 
@@ -159,9 +167,7 @@ class ForemanOrchestrator:
 
         elif self._is_work_request(prompt):
             # User requesting new work
-            return await self._handle_work_request(
-                prompt, issue_tool, context, providers
-            )
+            return await self._handle_work_request(prompt, issue_tool, context, providers)
 
         elif await self._is_resolution(prompt, issue_tool):
             # User providing input for blocked issue
@@ -209,7 +215,7 @@ class ForemanOrchestrator:
         """Check if user is providing resolution to blocked issue."""
         # Check if there are blocked issues
         blocked_result = await issue_tool.execute(
-            {"operation": "list", "filter": {"status": "pending_user_input"}}
+            {"operation": "list", "params": {"status": "pending_user_input"}}
         )
         blocked = blocked_result.output.get("issues", [])
 
@@ -252,9 +258,7 @@ class ForemanOrchestrator:
             response_parts.append(f"  • Issue #{issue['id']}: {issue['title']}")
 
         # Spawn workers for issues
-        workers_spawned = await self._spawn_workers_for_issues(
-            issues_created, issue_tool
-        )
+        workers_spawned = await self._spawn_workers_for_issues(issues_created, issue_tool)
 
         response_parts.append(f"\n🚀 Spawned {workers_spawned} workers to handle these issues.")
         response_parts.append("I'll keep you posted on progress!")
@@ -493,25 +497,34 @@ Complete this work. When done:
 Focus on this specific issue. Use the issue tool to update status.
 """
 
-        # Get worker bundle path/URL
-        worker_bundle_path = pool_config.get("worker_bundle")
-        if not worker_bundle_path:
+        # Get worker agent name from pool config
+        worker_agent = pool_config.get("worker_agent")
+        if not worker_agent:
+            logger.warning(f"No worker_agent configured for pool {pool_config.get('name')}")
+            return
+
+        # Get spawn capability from coordinator
+        spawn = self._coordinator.get_capability("session.spawn") if self._coordinator else None
+        if not spawn:
+            logger.warning("session.spawn capability not available - cannot spawn workers")
             return
 
         # Spawn worker session (fire-and-forget)
         try:
-            # Load worker bundle
-            bundle = await load_bundle(worker_bundle_path)
+            # Fire-and-forget: spawn worker and don't wait for result
+            asyncio.create_task(
+                spawn(
+                    agent_name=worker_agent,
+                    instruction=worker_prompt,
+                    parent_session=None,  # Independent worker
+                    agent_configs=self._agent_configs or {},
+                )
+            )
+            logger.info(f"Spawned worker {worker_agent} for issue {issue['id']}")
 
-            # Create worker session with bundle config
-            worker_session = AmplifierSession(config=bundle.config)
-
-            # Execute in background (fire-and-forget)
-            asyncio.create_task(worker_session.run(worker_prompt))
-
-        except Exception:
+        except Exception as e:
             # Worker spawn failed - issue stays in_progress
-            pass
+            logger.error(f"Failed to spawn worker: {e}")
 
     async def _handle_resolution(self, prompt: str, issue_tool) -> str | None:
         """
@@ -526,7 +539,7 @@ Focus on this specific issue. Use the issue tool to update status.
         """
         # Get blocked issues
         blocked_result = await issue_tool.execute(
-            {"operation": "list", "filter": {"status": "pending_user_input"}}
+            {"operation": "list", "params": {"status": "pending_user_input"}}
         )
         blocked = blocked_result.output.get("issues", [])
 
@@ -552,9 +565,7 @@ Focus on this specific issue. Use the issue tool to update status.
         # Spawn worker to continue with resolution
         pool_config = self._route_issue(issue)
         if pool_config:
-            await self._spawn_worker_with_resolution(
-                issue, prompt, pool_config, issue_tool
-            )
+            await self._spawn_worker_with_resolution(issue, prompt, pool_config, issue_tool)
 
             return f"✅ Got it! Resuming work on **{issue['title']}** with your input."
         else:
@@ -595,22 +606,31 @@ Description: {issue["description"]}
 Continue work with this new information. Update issue status when done.
 """
 
-        worker_bundle_path = pool_config.get("worker_bundle")
-        if not worker_bundle_path:
+        # Get worker agent name from pool config
+        worker_agent = pool_config.get("worker_agent")
+        if not worker_agent:
+            logger.warning(f"No worker_agent configured for pool {pool_config.get('name')}")
+            return
+
+        # Get spawn capability from coordinator
+        spawn = self._coordinator.get_capability("session.spawn") if self._coordinator else None
+        if not spawn:
+            logger.warning("session.spawn capability not available")
             return
 
         try:
-            # Load worker bundle
-            bundle = await load_bundle(worker_bundle_path)
+            asyncio.create_task(
+                spawn(
+                    agent_name=worker_agent,
+                    instruction=worker_prompt,
+                    parent_session=None,
+                    agent_configs=self._agent_configs or {},
+                )
+            )
+            logger.info(f"Spawned continuation worker {worker_agent} for issue {issue['id']}")
 
-            # Create worker session
-            worker_session = AmplifierSession(config=bundle.config)
-
-            # Execute in background (fire-and-forget)
-            asyncio.create_task(worker_session.run(worker_prompt))
-
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to spawn continuation worker: {e}")
 
     async def _handle_general(self, issue_tool) -> str | None:
         """
@@ -625,7 +645,7 @@ Continue work with this new information. Update issue status when done.
             Response message or None
         """
         # Check if there are open issues waiting
-        open_result = await issue_tool.execute({"operation": "list", "filter": {"status": "open"}})
+        open_result = await issue_tool.execute({"operation": "list", "params": {"status": "open"}})
         open_issues = open_result.output.get("issues", [])
 
         if open_issues:

@@ -5,8 +5,60 @@ bundle:
   description: Conversational autonomous work orchestration bundle
 
 includes:
-  - bundle: git+https://github.com/microsoft/amplifier-foundation@main
-  - bundle: git+https://github.com/microsoft/amplifier-bundle-issues@main#subdirectory=behaviors/issues.yaml
+  # Issues bundle already includes foundation
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-issues@main
+
+session:
+  orchestrator:
+    module: orchestrator-foreman
+    source: ./src/amplifier_module_orchestrator_foreman
+    config:
+      # Worker pool configuration - workers are spawned via session.spawn capability
+      worker_pools:
+        - name: coding-pool
+          worker_agent: foreman:coding-worker
+          max_concurrent: 3
+          route_types: [coding, implementation, bugfix, refactor]
+        
+        - name: research-pool
+          worker_agent: foreman:research-worker
+          max_concurrent: 2
+          route_types: [research, analysis, investigation]
+        
+        - name: testing-pool
+          worker_agent: foreman:testing-worker
+          max_concurrent: 2
+          route_types: [testing, qa, verification]
+      
+      routing:
+        default_pool: coding-pool
+        rules:
+          - if_metadata_type: [coding, implementation, bugfix]
+            then_pool: coding-pool
+          - if_metadata_type: [research, analysis]
+            then_pool: research-pool
+          - if_metadata_type: [testing, qa]
+            then_pool: testing-pool
+
+# Worker agent definitions (spawned by foreman orchestrator)
+agents:
+  foreman:coding-worker:
+    description: Coding worker for implementation tasks
+    instructions: |
+      You are a coding worker. Complete the assigned issue and update its status.
+      Use the issue tool to update status to 'completed' with results when done.
+
+  foreman:research-worker:
+    description: Research worker for analysis tasks  
+    instructions: |
+      You are a research worker. Investigate the assigned issue thoroughly.
+      Use the issue tool to update status with your findings.
+
+  foreman:testing-worker:
+    description: Testing worker for QA tasks
+    instructions: |
+      You are a testing worker. Verify the assigned issue.
+      Use the issue tool to update status with test results.
 ---
 
 # Foreman Orchestrator
@@ -104,49 +156,3 @@ Created 3 issues:
 ```
 
 @foreman:context/instructions.md
-
----
-
-orchestrator:
-  module: orchestrator-foreman
-  source: ./src
-  config:
-    # Worker pool configuration
-    # Workers are bundled locally in ./workers/ as examples.
-    # Users can override worker_bundle paths to use their own bundles
-    # (e.g., git+https://github.com/yourorg/custom-coding-worker@main)
-    worker_pools:
-      # Coding tasks - file operations and code tools
-      - name: coding-pool
-        worker_bundle: ./workers/amplifier-bundle-coding-worker
-        max_concurrent: 3
-        route_types: [coding, implementation, bugfix, refactor]
-      
-      # Research tasks - web access
-      - name: research-pool
-        worker_bundle: ./workers/amplifier-bundle-research-worker
-        max_concurrent: 2
-        route_types: [research, analysis, investigation]
-      
-      # Testing tasks - test execution
-      - name: testing-pool
-        worker_bundle: ./workers/amplifier-bundle-testing-worker
-        max_concurrent: 2
-        route_types: [testing, qa, verification]
-    
-    # Routing configuration
-    routing:
-      # Default pool when no rules match
-      default_pool: coding-pool
-      
-      # Metadata-based routing rules
-      rules:
-        # Route by issue type
-        - if_metadata_type: [coding, implementation, bugfix]
-          then_pool: coding-pool
-        
-        - if_metadata_type: [research, analysis]
-          then_pool: research-pool
-        
-        - if_metadata_type: [testing, qa]
-          then_pool: testing-pool
