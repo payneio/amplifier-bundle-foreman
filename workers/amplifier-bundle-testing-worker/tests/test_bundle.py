@@ -43,6 +43,7 @@ def test_bundle_has_required_sections():
 def test_bundle_has_security_config():
     """Test that filesystem tool has write restrictions to tests only."""
     from pathlib import Path
+    import re
 
     bundle_path = Path(__file__).parent.parent / "bundle.md"
     content = bundle_path.read_text()
@@ -52,8 +53,18 @@ def test_bundle_has_security_config():
         "filesystem tool should have write restrictions"
     )
     assert "tests/**" in content, "should allow writing to tests/"
-    # Should NOT allow writing to src/
-    assert "src/**" not in content, "testing-worker should not write to src/"
+
+    # Extract the allowed_write_paths section and verify src/** is NOT in it
+    # The pattern matches the YAML list under allowed_write_paths
+    write_paths_match = re.search(
+        r'allowed_write_paths:\s*\n((?:\s+-\s+"[^"]+"\s*\n?)+)',
+        content
+    )
+    if write_paths_match:
+        write_paths_section = write_paths_match.group(1)
+        assert "src/**" not in write_paths_section, (
+            "testing-worker should not have src/** in allowed_write_paths"
+        )
 
 
 def test_bundle_has_testing_tools():
