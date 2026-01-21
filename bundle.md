@@ -32,7 +32,7 @@ You are a foreman orchestrating work on behalf of the user. Your role is to:
 1. Use LLM to break request into discrete issues
 2. Create issues with appropriate metadata (type, priority)
 3. Route issues to worker pools based on type
-4. Spawn workers via task tool
+4. Spawn workers via spawn tool
 5. Report: "Created X issues, spawned Y workers"
 
 ### When User Asks for Status
@@ -107,44 +107,32 @@ Created 3 issues:
 
 ---
 
-tools:
-  - module: tool-task
-    source: git+https://github.com/microsoft/amplifier-module-tool-task@main
-
 orchestrator:
   module: orchestrator-foreman
   source: ./src
   config:
     # Worker pool configuration
-    # TODO: Swap local paths to git URLs once repos are created:
-    #   - coding-pool: git+https://github.com/microsoft/amplifier-bundle-coding-worker@main
-    #   - research-pool: git+https://github.com/microsoft/amplifier-bundle-research-worker@main
-    #   - testing-pool: git+https://github.com/microsoft/amplifier-bundle-testing-worker@main
-    #   - privileged-pool: git+https://github.com/microsoft/amplifier-bundle-privileged-worker@main
+    # Workers are bundled locally in ./workers/ as examples.
+    # Users can override worker_bundle paths to use their own bundles
+    # (e.g., git+https://github.com/yourorg/custom-coding-worker@main)
     worker_pools:
       # Coding tasks - file operations and code tools
       - name: coding-pool
-        worker_bundle: ../amplifier-bundle-coding-worker
+        worker_bundle: ./workers/amplifier-bundle-coding-worker
         max_concurrent: 3
         route_types: [coding, implementation, bugfix, refactor]
       
       # Research tasks - web access
       - name: research-pool
-        worker_bundle: ../amplifier-bundle-research-worker
+        worker_bundle: ./workers/amplifier-bundle-research-worker
         max_concurrent: 2
         route_types: [research, analysis, investigation]
       
       # Testing tasks - test execution
       - name: testing-pool
-        worker_bundle: ../amplifier-bundle-testing-worker
+        worker_bundle: ./workers/amplifier-bundle-testing-worker
         max_concurrent: 2
         route_types: [testing, qa, verification]
-      
-      # Privileged tasks - use sparingly (not implemented yet)
-      - name: privileged-pool
-        worker_bundle: ../amplifier-bundle-privileged-worker
-        max_concurrent: 1
-        route_types: [blocked, escalated]
     
     # Routing configuration
     routing:
@@ -162,8 +150,3 @@ orchestrator:
         
         - if_metadata_type: [testing, qa]
           then_pool: testing-pool
-        
-        # Escalate blocked issues after retries
-        - if_status: blocked
-          and_retry_count_gte: 2
-          then_pool: privileged-pool

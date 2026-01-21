@@ -9,7 +9,8 @@ background worker execution.
 import asyncio
 from typing import Any
 
-from amplifier_core import HookRegistry
+from amplifier_core import AmplifierSession, HookRegistry
+from amplifier_foundation import load_bundle
 
 
 class ForemanOrchestrator:
@@ -53,17 +54,16 @@ class ForemanOrchestrator:
             prompt: User's message
             context: Session context for message history
             providers: Available LLM providers
-            tools: Available tools (issue, task, etc.)
+            tools: Available tools (issue, etc.)
             hooks: Hook registry
 
         Returns:
             Response message to user
         """
         issue_tool = tools.get("issue")
-        task_tool = tools.get("task")
 
-        if not issue_tool or not task_tool:
-            return "⚠️  Foreman requires 'issue' and 'task' tools to be available."
+        if not issue_tool:
+            return "⚠️  Foreman requires 'issue' tool to be available."
 
         response_parts = []
 
@@ -82,16 +82,14 @@ class ForemanOrchestrator:
 
         # Step 4: Process user's current request
         request_response = await self._process_request(
-            prompt, issue_tool, task_tool, context, providers
+            prompt, issue_tool, context, providers
         )
         if request_response:
             response_parts.append(request_response)
 
         # Step 5: Return quickly
         if not response_parts:
-            response_parts.append(
-                "All systems running. Let me know if you need anything!"
-            )
+            response_parts.append("All systems running. Let me know if you need anything!")
 
         return "\n\n".join(response_parts)
 
@@ -113,9 +111,7 @@ class ForemanOrchestrator:
 
         # Filter to new completions (not already reported)
         new_completions = [
-            issue
-            for issue in completed
-            if issue["id"] not in self._reported_completions
+            issue for issue in completed if issue["id"] not in self._reported_completions
         ]
 
         # Mark as reported
@@ -129,9 +125,7 @@ class ForemanOrchestrator:
         blocked = blocked_result.output.get("issues", [])
 
         # Filter to new blockers
-        new_blockers = [
-            issue for issue in blocked if issue["id"] not in self._reported_blockers
-        ]
+        new_blockers = [issue for issue in blocked if issue["id"] not in self._reported_blockers]
 
         # Mark as reported
         for issue in new_blockers:
@@ -143,7 +137,6 @@ class ForemanOrchestrator:
         self,
         prompt: str,
         issue_tool,
-        task_tool,
         context,
         providers: dict[str, Any],
     ) -> str | None:
@@ -153,7 +146,6 @@ class ForemanOrchestrator:
         Args:
             prompt: User's message
             issue_tool: Issue management tool
-            task_tool: Task spawning tool
             context: Session context
             providers: Available LLM providers
 
@@ -168,16 +160,16 @@ class ForemanOrchestrator:
         elif self._is_work_request(prompt):
             # User requesting new work
             return await self._handle_work_request(
-                prompt, issue_tool, task_tool, context, providers
+                prompt, issue_tool, context, providers
             )
 
         elif await self._is_resolution(prompt, issue_tool):
             # User providing input for blocked issue
-            return await self._handle_resolution(prompt, issue_tool, task_tool)
+            return await self._handle_resolution(prompt, issue_tool)
 
         else:
             # General conversation - check if there's pending work
-            return await self._handle_general(issue_tool, task_tool)
+            return await self._handle_general(issue_tool)
 
     def _is_status_request(self, prompt: str) -> bool:
         """Check if user is asking for status."""
@@ -228,7 +220,6 @@ class ForemanOrchestrator:
         self,
         prompt: str,
         issue_tool,
-        task_tool,
         context,
         providers: dict[str, Any],
     ) -> str:
@@ -240,7 +231,6 @@ class ForemanOrchestrator:
         Args:
             prompt: User's work request
             issue_tool: Issue management tool
-            task_tool: Task spawning tool
             context: Session context
             providers: Available LLM providers
 
@@ -263,12 +253,10 @@ class ForemanOrchestrator:
 
         # Spawn workers for issues
         workers_spawned = await self._spawn_workers_for_issues(
-            issues_created, task_tool, issue_tool
+            issues_created, issue_tool
         )
 
-        response_parts.append(
-            f"\n🚀 Spawned {workers_spawned} workers to handle these issues."
-        )
+        response_parts.append(f"\n🚀 Spawned {workers_spawned} workers to handle these issues.")
         response_parts.append("I'll keep you posted on progress!")
 
         return "\n".join(response_parts)
@@ -336,9 +324,7 @@ Keep tasks focused and independent where possible."""
 
         # Call LLM to analyze
         try:
-            response = await provider.complete(
-                [{"role": "user", "content": analysis_prompt}]
-            )
+            response = await provider.complete([{"role": "user", "content": analysis_prompt}])
 
             # Parse response
             import json
@@ -381,9 +367,7 @@ Keep tasks focused and independent where possible."""
             )
             return [result.output["issue"]]
 
-    async def _spawn_workers_for_issues(
-        self, issues: list[dict], task_tool, issue_tool
-    ) -> int:
+    async def _spawn_workers_for_issues(self, issues: list[dict], issue_tool) -> int:
         """
         Spawn workers for issues.
 
@@ -391,7 +375,6 @@ Keep tasks focused and independent where possible."""
 
         Args:
             issues: List of issues to assign
-            task_tool: Task spawning tool
             issue_tool: Issue management tool
 
         Returns:
@@ -417,7 +400,7 @@ Keep tasks focused and independent where possible."""
             )
 
             # Create spawn task
-            spawn_task = self._spawn_worker(issue, pool_config, task_tool)
+            spawn_task = self._spawn_worker(issue, pool_config)
             spawn_tasks.append(spawn_task)
 
         # Spawn all workers in parallel
@@ -483,14 +466,15 @@ Keep tasks focused and independent where possible."""
 
         return None
 
-    async def _spawn_worker(self, issue: dict, pool_config: dict, task_tool) -> None:
+    async def _spawn_worker(self, issue: dict, pool_config: dict) -> None:
         """
         Spawn worker for issue using configured worker bundle.
+
+        Loads the worker bundle and creates a new session to handle the issue.
 
         Args:
             issue: Issue to work on
             pool_config: Worker pool configuration
-            task_tool: Task spawning tool
         """
         # Build worker prompt with issue context
         worker_prompt = f"""You are handling issue #{issue["id"]}.
@@ -509,35 +493,33 @@ Complete this work. When done:
 Focus on this specific issue. Use the issue tool to update status.
 """
 
-        # Get worker bundle reference
-        worker_bundle = pool_config.get("worker_bundle")
-        if not worker_bundle:
-            # Fallback to worker_type (agent name)
-            worker_bundle = pool_config.get("worker_type", "general-purpose")
+        # Get worker bundle path/URL
+        worker_bundle_path = pool_config.get("worker_bundle")
+        if not worker_bundle_path:
+            return
 
-        # Spawn worker (fire-and-forget)
+        # Spawn worker session (fire-and-forget)
         try:
-            await task_tool.execute(
-                {
-                    "agent": worker_bundle,
-                    "instruction": worker_prompt,
-                    # Future: "inherit_context": "recent" when available
-                }
-            )
-        except Exception:
-            # Worker spawn failed - mark issue as blocked
-            pass  # Issue stays in_progress, foreman will detect timeout
+            # Load worker bundle
+            bundle = await load_bundle(worker_bundle_path)
 
-    async def _handle_resolution(
-        self, prompt: str, issue_tool, task_tool
-    ) -> str | None:
+            # Create worker session with bundle config
+            worker_session = AmplifierSession(config=bundle.config)
+
+            # Execute in background (fire-and-forget)
+            asyncio.create_task(worker_session.run(worker_prompt))
+
+        except Exception:
+            # Worker spawn failed - issue stays in_progress
+            pass
+
+    async def _handle_resolution(self, prompt: str, issue_tool) -> str | None:
         """
         Handle user providing resolution to blocked issue.
 
         Args:
             prompt: User's resolution
             issue_tool: Issue management tool
-            task_tool: Task spawning tool
 
         Returns:
             Response message or None if no blocked issues
@@ -571,7 +553,7 @@ Focus on this specific issue. Use the issue tool to update status.
         pool_config = self._route_issue(issue)
         if pool_config:
             await self._spawn_worker_with_resolution(
-                issue, prompt, pool_config, task_tool, issue_tool
+                issue, prompt, pool_config, issue_tool
             )
 
             return f"✅ Got it! Resuming work on **{issue['title']}** with your input."
@@ -579,7 +561,7 @@ Focus on this specific issue. Use the issue tool to update status.
             return f"✅ Updated issue **{issue['title']}** with your input."
 
     async def _spawn_worker_with_resolution(
-        self, issue: dict, resolution: str, pool_config: dict, task_tool, issue_tool
+        self, issue: dict, resolution: str, pool_config: dict, issue_tool
     ) -> None:
         """
         Spawn worker to resume blocked issue with resolution.
@@ -588,7 +570,6 @@ Focus on this specific issue. Use the issue tool to update status.
             issue: Issue to resume
             resolution: User's resolution
             pool_config: Worker pool configuration
-            task_tool: Task spawning tool
             issue_tool: Issue management tool
         """
         # Mark as in_progress
@@ -614,16 +595,24 @@ Description: {issue["description"]}
 Continue work with this new information. Update issue status when done.
 """
 
-        worker_bundle = pool_config.get("worker_bundle", "general-purpose")
+        worker_bundle_path = pool_config.get("worker_bundle")
+        if not worker_bundle_path:
+            return
 
         try:
-            await task_tool.execute(
-                {"agent": worker_bundle, "instruction": worker_prompt}
-            )
+            # Load worker bundle
+            bundle = await load_bundle(worker_bundle_path)
+
+            # Create worker session
+            worker_session = AmplifierSession(config=bundle.config)
+
+            # Execute in background (fire-and-forget)
+            asyncio.create_task(worker_session.run(worker_prompt))
+
         except Exception:
             pass
 
-    async def _handle_general(self, issue_tool, task_tool) -> str | None:
+    async def _handle_general(self, issue_tool) -> str | None:
         """
         Handle general conversation.
 
@@ -631,23 +620,19 @@ Continue work with this new information. Update issue status when done.
 
         Args:
             issue_tool: Issue management tool
-            task_tool: Task spawning tool
 
         Returns:
             Response message or None
         """
         # Check if there are open issues waiting
-        open_result = await issue_tool.execute(
-            {"operation": "list", "filter": {"status": "open"}}
-        )
+        open_result = await issue_tool.execute({"operation": "list", "filter": {"status": "open"}})
         open_issues = open_result.output.get("issues", [])
 
         if open_issues:
             # Spawn workers for open issues
             workers_spawned = await self._spawn_workers_for_issues(
-                open_issues[:3],
-                task_tool,
-                issue_tool,  # Spawn for first 3
+                open_issues[:3],  # Spawn for first 3
+                issue_tool,
             )
             if workers_spawned:
                 return f"(Spawned {workers_spawned} workers for pending issues)"
