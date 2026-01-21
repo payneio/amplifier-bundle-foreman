@@ -235,16 +235,82 @@ routing:
 
 ### Running Tests
 
+There are three levels of testing available:
+
+#### Quick Unit Tests (requires local amplifier-core)
+
 ```bash
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
-pytest
+# Run unit tests
+pytest tests/
 
 # Run with coverage
 pytest --cov=amplifier_bundle_foreman
 ```
+
+#### Full Test Suite in Shadow Environment (Recommended)
+
+The shadow environment provides isolated, reproducible testing without affecting your local environment:
+
+```bash
+# Run the full test suite (unit + worker + integration tests)
+./test-example/run_shadow_tests.sh
+```
+
+This script:
+1. Creates an isolated shadow environment
+2. Installs all dependencies from GitHub (amplifier-core, amplifier-foundation)
+3. Runs 14 unit tests for the orchestrator
+4. Runs 19 tests across all 3 worker bundles
+5. Runs 6 integration tests demonstrating end-to-end workflow
+6. Cleans up the shadow environment
+
+#### Manual Shadow Environment Testing
+
+For interactive testing or debugging:
+
+```bash
+# Create shadow environment with local source
+amplifier tool invoke shadow \
+    operation=create \
+    local_sources='["/path/to/amplifier-bundle-foreman:microsoft/amplifier-bundle-foreman"]'
+
+# Note the shadow_id from output, then install dependencies
+amplifier tool invoke shadow operation=exec shadow_id=<id> \
+    command="uv pip install 'amplifier-core @ git+https://github.com/microsoft/amplifier-core'"
+amplifier tool invoke shadow operation=exec shadow_id=<id> \
+    command="uv pip install 'amplifier-foundation @ git+https://github.com/microsoft/amplifier-foundation'"
+amplifier tool invoke shadow operation=exec shadow_id=<id> \
+    command="uv pip install -e '/workspace/amplifier-bundle-foreman[dev]'"
+
+# Run tests
+amplifier tool invoke shadow operation=exec shadow_id=<id> \
+    command="cd /workspace/amplifier-bundle-foreman && pytest tests/ -v"
+
+# Run integration tests
+amplifier tool invoke shadow operation=exec shadow_id=<id> \
+    command="cd /workspace/amplifier-bundle-foreman && python test-example/integration_test.py"
+
+# Clean up when done
+amplifier tool invoke shadow operation=destroy shadow_id=<id>
+```
+
+### Integration Test Details
+
+The integration tests in `test-example/` demonstrate the foreman's capabilities:
+
+| Test | What It Verifies |
+|------|------------------|
+| Work Request Breakdown | LLM-based decomposition of requests into issues |
+| Issue Routing | Correct routing to worker pools by type |
+| Status Reporting | Comprehensive status with all issue states |
+| Completion Reporting | Proactive reporting without repetition |
+| Blocker Handling | Surfacing blockers and handling resolutions |
+| Full Workflow | Multi-turn simulation with concurrent work |
+
+See `test-example/README.md` for detailed output examples.
 
 ### Code Quality
 
