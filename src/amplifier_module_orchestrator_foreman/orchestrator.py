@@ -25,9 +25,10 @@ WORKER_AGENT_CONFIGS = {
 
 When done, use the issue_manager tool with:
 - operation: "update"
-- issue_id: [the issue ID from your assignment]
-- status: "completed"
-- comment: [summary of what you did]
+- params:
+  - issue_id: [the issue ID from your assignment]
+  - status: "completed"
+  - description: [summary of what you did]
 
 If you need clarification, update the issue with status "pending_user_input".""",
     },
@@ -38,9 +39,10 @@ If you need clarification, update the issue with status "pending_user_input"."""
 
 When done, use the issue_manager tool with:
 - operation: "update"
-- issue_id: [the issue ID from your assignment]
-- status: "completed"
-- comment: [your findings and analysis]
+- params:
+  - issue_id: [the issue ID from your assignment]
+  - status: "completed"
+  - description: [your findings and analysis]
 
 If you need clarification, update the issue with status "pending_user_input".""",
     },
@@ -51,9 +53,10 @@ If you need clarification, update the issue with status "pending_user_input"."""
 
 When done, use the issue_manager tool with:
 - operation: "update"
-- issue_id: [the issue ID from your assignment]
-- status: "completed"
-- comment: [test results and findings]
+- params:
+  - issue_id: [the issue ID from your assignment]
+  - status: "completed"
+  - description: [test results and findings]
 
 If you need clarification, update the issue with status "pending_user_input".""",
     },
@@ -417,8 +420,10 @@ If you need clarification, update the issue with status "pending_user_input".
             await issue_tool.execute(
                 {
                     "operation": "update",
-                    "issue_id": issue_id,
-                    "status": "in_progress",
+                    "params": {
+                        "issue_id": issue_id,
+                        "status": "in_progress",
+                    },
                 }
             )
         except Exception as e:
