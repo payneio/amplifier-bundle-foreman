@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from amplifier_core import HookRegistry, ToolSpec
+from amplifier_core.message_models import ChatRequest, Message, ToolCallBlock, ToolResultBlock
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ class ForemanOrchestrator:
             progress_report = await self._check_worker_progress(issue_tool)
 
         # Build messages with foreman system prompt
-        messages = self._build_messages(prompt, context, progress_report)
+        messages = await self._build_messages(prompt, context, progress_report)
 
         # Get tool specs
         tool_specs = self._get_tool_specs(tools)
@@ -127,43 +128,56 @@ class ForemanOrchestrator:
         while iteration < self.max_iterations:
             iteration += 1
 
-            # Call LLM - provider.complete() handles message conversion
+            # Call LLM - provider.complete() requires ChatRequest
             try:
-                response = await provider.complete(messages, tools=tool_specs)
+                # Convert dict messages to Message objects
+                message_objects = [Message(**m) for m in messages]
+                request = ChatRequest(messages=message_objects, tools=tool_specs)
+                response = await provider.complete(request)
             except Exception as e:
                 logger.error(f"LLM call failed: {e}")
                 return f"Error communicating with LLM: {e}"
 
-            # Extract response content
+            # Extract text content from response content blocks
             if response.content:
-                final_response = response.content
+                text_parts = []
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        text_parts.append(block.text)
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                if text_parts:
+                    final_response = "\n".join(text_parts)
 
             # Handle tool calls
             if response.tool_calls:
-                # Add assistant message with tool calls
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": response.content or "",
-                        "tool_calls": [
-                            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                            for tc in response.tool_calls
-                        ],
-                    }
-                )
+                # Add assistant message with tool calls as content blocks
+                assistant_content: list[Any] = []
+                if response.content:
+                    assistant_content.append({"type": "text", "text": response.content})
+                for tc in response.tool_calls:
+                    assistant_content.append(
+                        ToolCallBlock(
+                            id=tc.id,
+                            name=tc.name,
+                            input=tc.arguments,
+                        ).model_dump()
+                    )
+                messages.append({"role": "assistant", "content": assistant_content})
 
                 # Execute tools and collect results
                 tool_results = await self._execute_tools(response.tool_calls, tools, issue_tool)
 
-                # Add tool results as user message
+                # Add tool results as content blocks in a user message
+                tool_result_content: list[Any] = []
                 for result in tool_results:
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": result["tool_call_id"],
-                            "content": result["content"],
-                        }
+                    tool_result_content.append(
+                        ToolResultBlock(
+                            tool_call_id=result["tool_call_id"],
+                            output=result["content"],
+                        ).model_dump()
                     )
+                messages.append({"role": "user", "content": tool_result_content})
 
                 # Continue loop for more LLM processing
                 continue
@@ -176,7 +190,7 @@ class ForemanOrchestrator:
 
         return final_response
 
-    def _build_messages(
+    async def _build_messages(
         self, prompt: str, context: Any, progress_report: str
     ) -> list[dict[str, Any]]:
         """Build message list with foreman system prompt and history."""
@@ -189,8 +203,10 @@ class ForemanOrchestrator:
 
         messages.append({"role": "system", "content": system_content})
 
-        # Add conversation history from context
-        history = context.get_messages() if hasattr(context, "get_messages") else []
+        # Add conversation history from context (get_messages is async)
+        history = []
+        if hasattr(context, "get_messages"):
+            history = await context.get_messages()
         for msg in history[-10:]:  # Last 10 messages for context
             if msg.get("role") in ("user", "assistant"):
                 messages.append({"role": msg["role"], "content": msg.get("content", "")})
@@ -204,15 +220,16 @@ class ForemanOrchestrator:
         """Get tool specifications for LLM."""
         specs = []
         for name, tool in tools.items():
-            if hasattr(tool, "get_schema"):
-                schema = tool.get_schema()
-                specs.append(
-                    ToolSpec(
-                        name=name,
-                        description=schema.get("description", ""),
-                        parameters=schema.get("input_schema", schema.get("parameters", {})),
-                    )
+            # Use Tool protocol: name, description, input_schema properties
+            description = getattr(tool, "description", "")
+            input_schema = getattr(tool, "input_schema", {})
+            specs.append(
+                ToolSpec(
+                    name=name,
+                    description=description,
+                    parameters=input_schema,
                 )
+            )
         return specs
 
     async def _execute_tools(
