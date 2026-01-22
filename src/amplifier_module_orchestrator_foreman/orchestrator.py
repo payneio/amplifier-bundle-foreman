@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from amplifier_core import HookRegistry, ToolSpec
-from amplifier_core.message_models import ChatRequest, Message, ToolCallBlock, ToolResultBlock
+from amplifier_core.message_models import ChatRequest, Message
 
 logger = logging.getLogger(__name__)
 
@@ -151,33 +151,46 @@ class ForemanOrchestrator:
 
             # Handle tool calls
             if response.tool_calls:
-                # Add assistant message with tool calls as content blocks
+                # Build assistant message content from response
                 assistant_content: list[Any] = []
-                if response.content:
-                    assistant_content.append({"type": "text", "text": response.content})
-                for tc in response.tool_calls:
-                    assistant_content.append(
-                        ToolCallBlock(
-                            id=tc.id,
-                            name=tc.name,
-                            input=tc.arguments,
-                        ).model_dump()
-                    )
-                messages.append({"role": "assistant", "content": assistant_content})
+                if response.content and isinstance(response.content, list):
+                    for block in response.content:
+                        if hasattr(block, "model_dump"):
+                            assistant_content.append(block.model_dump())
+                        else:
+                            assistant_content.append(block)
+                elif final_response:
+                    assistant_content.append({"type": "text", "text": final_response})
+
+                # Add assistant message with tool_calls as SEPARATE field (not in content!)
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": assistant_content if assistant_content else "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "tool": tc.name,
+                            "arguments": tc.arguments,
+                        }
+                        for tc in response.tool_calls
+                    ],
+                }
+                messages.append(assistant_msg)
 
                 # Execute tools and collect results
-                tool_results = await self._execute_tools(response.tool_calls, tools, issue_tool)
+                tool_results = await self._execute_tools(
+                    response.tool_calls, tools, issue_tool, hooks
+                )
 
-                # Add tool results as content blocks in a user message
-                tool_result_content: list[Any] = []
+                # Add tool results as role="tool" messages (not user messages!)
                 for result in tool_results:
-                    tool_result_content.append(
-                        ToolResultBlock(
-                            tool_call_id=result["tool_call_id"],
-                            output=result["content"],
-                        ).model_dump()
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": result["tool_call_id"],
+                            "content": result["content"],
+                        }
                     )
-                messages.append({"role": "user", "content": tool_result_content})
 
                 # Continue loop for more LLM processing
                 continue
@@ -237,8 +250,9 @@ class ForemanOrchestrator:
         tool_calls: list[Any],
         tools: dict[str, Any],
         issue_tool: Any,
+        hooks: Any,
     ) -> list[dict[str, Any]]:
-        """Execute tool calls and return results."""
+        """Execute tool calls and return results, emitting hook events."""
         results = []
 
         for tc in tool_calls:
@@ -251,6 +265,13 @@ class ForemanOrchestrator:
                     }
                 )
                 continue
+
+            # Emit tool:pre event
+            if hooks:
+                await hooks.emit(
+                    "tool:pre",
+                    {"tool_name": tc.name, "arguments": tc.arguments},
+                )
 
             try:
                 # Execute the tool
@@ -269,6 +290,13 @@ class ForemanOrchestrator:
                     }
                 )
 
+                # Emit tool:post event on success
+                if hooks:
+                    await hooks.emit(
+                        "tool:post",
+                        {"tool_name": tc.name, "result": output},
+                    )
+
             except Exception as e:
                 logger.error(f"Tool {tc.name} failed: {e}")
                 results.append(
@@ -277,6 +305,12 @@ class ForemanOrchestrator:
                         "content": f"Error: {e}",
                     }
                 )
+                # Emit tool:post event on error too (for logging/tracking)
+                if hooks:
+                    await hooks.emit(
+                        "tool:post",
+                        {"tool_name": tc.name, "error": str(e)},
+                    )
 
         return results
 
