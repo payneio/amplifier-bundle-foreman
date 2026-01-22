@@ -10,7 +10,7 @@ bundle:
 session:
   orchestrator:
     module: orchestrator-foreman
-    source: ./src/amplifier_module_orchestrator_foreman
+    source: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=src/amplifier_module_orchestrator_foreman
     config:
       # Worker pool configuration
       worker_pools:
