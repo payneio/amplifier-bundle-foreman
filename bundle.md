@@ -49,28 +49,10 @@ tools:
   - module: tool-issue
     source: git+https://github.com/microsoft/amplifier-bundle-issues@main#subdirectory=modules/tool-issue
 
-# Worker agents (spawned with foundation bundle for full toolset)
+# Worker agents loaded from agents/ directory
 agents:
-  foreman:coding-worker:
-    description: Coding worker for implementation tasks
-    bundle: git+https://github.com/microsoft/amplifier-foundation@main
-    instructions: |
-      You are a coding worker. Complete the assigned issue and update its status.
-      Use the issue_manager tool to update status to 'completed' with results when done.
-
-  foreman:research-worker:
-    description: Research worker for analysis tasks
-    bundle: git+https://github.com/microsoft/amplifier-foundation@main
-    instructions: |
-      You are a research worker. Investigate the assigned issue thoroughly.
-      Use the issue_manager tool to update status with your findings.
-
-  foreman:testing-worker:
-    description: Testing worker for QA tasks
-    bundle: git+https://github.com/microsoft/amplifier-foundation@main
-    instructions: |
-      You are a testing worker. Verify the assigned issue.
-      Use the issue_manager tool to update status with test results.
+  dirs:
+    - foreman:agents
 ---
 
 # Foreman Orchestrator
