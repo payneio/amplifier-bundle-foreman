@@ -15,6 +15,50 @@ from amplifier_core.message_models import ChatRequest, Message
 
 logger = logging.getLogger(__name__)
 
+# Worker agent configurations - defined inline to ensure availability during spawn
+# These configurations tell the spawn system how to set up each worker type
+WORKER_AGENT_CONFIGS = {
+    "foreman:coding-worker": {
+        "description": "Coding worker for implementation tasks",
+        "bundle": "git+https://github.com/microsoft/amplifier-foundation@main",
+        "instructions": """You are a coding worker. Complete the assigned issue and update its status.
+
+When done, use the issue_manager tool with:
+- operation: "update"
+- issue_id: [the issue ID from your assignment]
+- status: "completed"
+- comment: [summary of what you did]
+
+If you need clarification, update the issue with status "pending_user_input".""",
+    },
+    "foreman:research-worker": {
+        "description": "Research worker for analysis tasks",
+        "bundle": "git+https://github.com/microsoft/amplifier-foundation@main",
+        "instructions": """You are a research worker. Investigate the assigned issue thoroughly.
+
+When done, use the issue_manager tool with:
+- operation: "update"
+- issue_id: [the issue ID from your assignment]
+- status: "completed"
+- comment: [your findings and analysis]
+
+If you need clarification, update the issue with status "pending_user_input".""",
+    },
+    "foreman:testing-worker": {
+        "description": "Testing worker for QA tasks",
+        "bundle": "git+https://github.com/microsoft/amplifier-foundation@main",
+        "instructions": """You are a testing worker. Verify the assigned issue.
+
+When done, use the issue_manager tool with:
+- operation: "update"
+- issue_id: [the issue ID from your assignment]
+- status: "completed"
+- comment: [test results and findings]
+
+If you need clarification, update the issue with status "pending_user_input".""",
+    },
+}
+
 # System prompt that makes the LLM act as a foreman
 FOREMAN_SYSTEM_PROMPT = """You are a FOREMAN - a work coordinator who delegates tasks to specialized workers.
 
@@ -387,7 +431,7 @@ If you need clarification, update the issue with status "pending_user_input".
                     agent_name=worker_agent,
                     instruction=worker_prompt,
                     parent_session=None,
-                    agent_configs={},
+                    agent_configs=WORKER_AGENT_CONFIGS,
                 )
             )
             logger.info(f"Spawned worker {worker_agent} for issue {issue_id}")
