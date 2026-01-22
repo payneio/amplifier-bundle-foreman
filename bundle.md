@@ -13,30 +13,31 @@ session:
     source: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=src/amplifier_module_orchestrator_foreman
     config:
       # Worker pool configuration
+      # Valid issue_types: task, feature, bug, epic, chore
       worker_pools:
         - name: coding-pool
           worker_agent: foreman:coding-worker
           max_concurrent: 3
-          route_types: [coding, implementation, bugfix, refactor]
+          route_types: [task, feature, bug]
         
         - name: research-pool
           worker_agent: foreman:research-worker
           max_concurrent: 2
-          route_types: [research, analysis, investigation]
+          route_types: [epic]
         
         - name: testing-pool
           worker_agent: foreman:testing-worker
           max_concurrent: 2
-          route_types: [testing, qa, verification]
+          route_types: [chore]
       
       routing:
         default_pool: coding-pool
         rules:
-          - if_metadata_type: [coding, implementation, bugfix]
+          - if_metadata_type: [task, feature, bug]
             then_pool: coding-pool
-          - if_metadata_type: [research, analysis]
+          - if_metadata_type: [epic]
             then_pool: research-pool
-          - if_metadata_type: [testing, qa]
+          - if_metadata_type: [chore]
             then_pool: testing-pool
 
   context:
