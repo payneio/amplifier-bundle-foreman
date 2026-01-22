@@ -51,8 +51,10 @@ tools:
 
 # Worker agents loaded from agents/ directory
 agents:
-  dirs:
-    - foreman:agents
+  include:
+    - foreman:coding-worker
+    - foreman:research-worker
+    - foreman:testing-worker
 ---
 
 # Foreman Orchestrator
