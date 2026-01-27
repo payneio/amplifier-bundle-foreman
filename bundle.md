@@ -12,7 +12,7 @@ includes:
 session:
   orchestrator:
     module: orchestrator-foreman
-    source: git+https://github.com/microsoft/amplifier-bundle-foreman@main#subdirectory=modules/orchestrator-foreman
+    source: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=modules/orchestrator-foreman
     config:
       # Worker pool configuration
       # Valid issue_types: task, feature, bug, epic, chore
