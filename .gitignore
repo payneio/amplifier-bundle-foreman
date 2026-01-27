@@ -40,4 +40,4 @@ htmlcov/
 
 # mypy
 .mypy_cache/
-.amplifier/settings.local.yaml
+.amplifier
