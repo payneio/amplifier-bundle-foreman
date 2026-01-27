@@ -4,13 +4,15 @@ bundle:
   version: 1.0.0
   description: Standalone work orchestration bundle - delegates all work to workers
 
-# NO includes - this is a standalone bundle with minimal tools
+# NO foundation include - this is a standalone bundle with minimal tools
 # Workers inherit from foundation when spawned
+includes:
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-issues@main#subdirectory=behaviors/issues.yaml
 
 session:
   orchestrator:
     module: orchestrator-foreman
-    source: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=src/amplifier_module_orchestrator_foreman
+    source: git+https://github.com/microsoft/amplifier-bundle-foreman@main#subdirectory=modules/orchestrator-foreman
     config:
       # Worker pool configuration
       # Valid issue_types: task, feature, bug, epic, chore
@@ -43,11 +45,6 @@ session:
   context:
     module: context-simple
     source: git+https://github.com/microsoft/amplifier-module-context-simple@main
-
-# Foreman's ONLY tool - issue management
-tools:
-  - module: tool-issue
-    source: git+https://github.com/microsoft/amplifier-bundle-issues@main#subdirectory=modules/tool-issue
 
 # Worker agents loaded from agents/ directory
 agents:

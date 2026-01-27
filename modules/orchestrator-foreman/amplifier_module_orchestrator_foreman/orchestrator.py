@@ -527,7 +527,11 @@ If you need clarification, update the issue with status "pending_user_input".
 
 async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> None:
     """Mount the foreman orchestrator."""
+    print("FOREMAN DEBUG: Starting orchestrator-foreman mount")
     config = config or {}
+    print(f"FOREMAN DEBUG: Config: {config}")
     orchestrator = ForemanOrchestrator(config)
+    print("FOREMAN DEBUG: Created ForemanOrchestrator instance")
     await coordinator.mount("orchestrator", orchestrator)
+    print("FOREMAN DEBUG: Successfully mounted orchestrator")
     return None
