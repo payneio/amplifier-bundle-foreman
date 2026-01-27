@@ -363,6 +363,48 @@ Current limitations (future enhancements):
 - No dependency tracking (can't say "do B after A completes")
 - No worker context inheritance (workers start fresh each time)
 
+## Known Issues
+
+### Session Persistence Bug
+
+There is a known issue with the upstream amplifier-app-cli that affects session persistence in the foreman orchestrator:
+
+- **Bug**: SessionStore.get_metadata() crashes when the session directory doesn't exist yet
+- **Impact**: Worker sessions may fail with "Session not found" errors
+- **Status**: [Issue filed](https://github.com/payneio/amplifier-bundle-foreman/issues/1)
+- **Root cause**: In amplifier-app-cli cleanup code (main.py line 1790), the CLI attempts to access session metadata before the directory is created
+
+#### Workaround Options
+
+1. **Patch SessionStore.get_metadata()**
+
+   Create a patched version of amplifier-app-cli that handles non-existent session directories gracefully:
+
+   ```python
+   # In amplifier_app_cli/session_store.py
+   def get_metadata(self, session_id: str) -> dict | None:
+       """Get session metadata."""
+       session_dir = self.base_dir / session_id
+       if not session_dir.exists():
+           return None  # Return None instead of raising error
+       metadata_path = session_dir / "metadata.json"
+       if not metadata_path.exists():
+           return None
+       with open(metadata_path, "r", encoding="utf-8") as f:
+           return json.load(f)
+   ```
+
+2. **Create session directory before first save**
+
+   Another approach is to ensure the session directory exists before the first save:
+
+   ```python
+   # In amplifier_app_cli/main.py cleanup section
+   session_dir = store.base_dir / actual_session_id
+   session_dir.mkdir(exist_ok=True, parents=True)
+   existing_metadata = store.get_metadata(actual_session_id) or {}
+   ```
+
 ## Contributing
 
 Contributions welcome! Please:
