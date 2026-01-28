@@ -8,7 +8,9 @@ through issues and background workers rather than doing everything directly.
 import asyncio
 import json
 import logging
-from typing import Any
+import os
+import sys
+from typing import Any, Dict, List, Optional, Union
 
 from amplifier_core import HookRegistry, ToolSpec
 from amplifier_core.message_models import ChatRequest, Message
@@ -79,7 +81,7 @@ class ForemanOrchestrator:
     """Orchestrator that guides the LLM to coordinate work through issues and workers."""
 
     def __init__(self, config: dict[str, Any]) -> None:
-        """Initialize the foreman orchestrator."""
+        """Initialize the foreman orchestrator with configuration validation."""
         self.config = config
         self.worker_pools = config.get("worker_pools", [])
         self.routing_config = config.get("routing", {})
@@ -87,9 +89,48 @@ class ForemanOrchestrator:
 
         # Track spawned workers to avoid duplicates
         self._spawned_issues: set[str] = set()
+        
+        # Track worker spawn errors for reporting to user
+        self._spawn_errors: List[str] = []
 
         # Store coordinator for worker spawning
         self._coordinator: Any = None
+        
+        # Validate configuration
+        self._validate_config()
+        
+    def _validate_config(self) -> None:
+        """Validate orchestrator configuration and log warnings for issues."""
+        # Check if worker pools are configured
+        if not self.worker_pools:
+            logger.warning("No worker pools configured - the foreman will not be able to spawn workers")
+            return
+            
+        # Validate each pool configuration
+        for i, pool in enumerate(self.worker_pools):
+            pool_name = pool.get("name", f"pool-{i}")
+            
+            # Check for worker_bundle
+            if not pool.get("worker_bundle"):
+                logger.warning(f"Worker pool '{pool_name}' is missing worker_bundle configuration")
+            
+            # Check if worker_bundle is a full URL (recommended)
+            worker_bundle = pool.get("worker_bundle", "")
+            if worker_bundle and not (
+                worker_bundle.startswith("git+") or 
+                worker_bundle.startswith("http") or
+                worker_bundle.startswith("file:") or
+                worker_bundle.startswith("/")
+            ):
+                logger.warning(
+                    f"Worker pool '{pool_name}' uses a relative worker_bundle path '{worker_bundle}'. "
+                    "This may cause issues when running from different directories. "
+                    "Consider using full URLs like 'git+https://...'"
+                )
+                
+            # Check for name (required for routing)
+            if not pool.get("name"):
+                logger.warning(f"Worker pool #{i} is missing a name - routing may fail")
 
     async def execute(
         self,
@@ -122,6 +163,14 @@ class ForemanOrchestrator:
         progress_report = ""
         if issue_tool:
             progress_report = await self._check_worker_progress(issue_tool)
+            
+        # Add spawn errors to progress report if any exist
+        if hasattr(self, "_spawn_errors") and self._spawn_errors:
+            if progress_report:
+                progress_report += "\n\n"
+            progress_report += "⚠️ Worker Spawn Errors:\n" + "\n".join(self._spawn_errors)
+            # Clear errors after reporting
+            self._spawn_errors = []
 
         # Build messages with foreman system prompt
         messages = await self._build_messages(prompt, context, progress_report)
@@ -333,18 +382,29 @@ class ForemanOrchestrator:
             return
 
         self._spawned_issues.add(issue_id)
+        
+        # Track errors for reporting back to user
+        errors = []
 
         # Route to appropriate worker pool
         pool_config = self._route_issue(issue)
         if not pool_config:
-            logger.warning(f"No worker pool for issue {issue_id}")
+            error = f"No worker pool found for issue {issue_id}"
+            logger.warning(error)
+            self._append_spawn_error(issue_id, error)
             return
 
         # Get worker bundle path
         worker_bundle = pool_config.get("worker_bundle")
         if not worker_bundle:
-            logger.warning(f"No worker_bundle configured for pool {pool_config.get('name')}")
+            error = f"No worker_bundle configured for pool {pool_config.get('name', 'unknown')}"
+            logger.warning(error)
+            self._append_spawn_error(issue_id, error)
             return
+            
+        # Ensure worker_bundle is properly resolved
+        worker_bundle = self._resolve_bundle_path(worker_bundle)
+        logger.info(f"Resolved worker bundle path: {worker_bundle}")
 
         # Build worker prompt
         worker_prompt = f"""You are a worker assigned to complete this issue:
@@ -382,26 +442,58 @@ If you need clarification, update the issue with status "pending_user_input".
         try:
             logger.info(f"Spawning worker for issue {issue_id} using bundle {worker_bundle}")
             
-            # Get foundation primitives
+            # Get foundation primitives with enhanced verification
             load_bundle = self._coordinator.get_capability("bundle.load")
+            if not load_bundle:
+                error = "Required capability 'bundle.load' not available"
+                logger.error(error)
+                self._append_spawn_error(issue_id, error)
+                return
+                
             AmplifierSession = self._coordinator.get_capability("session.AmplifierSession")
-            
-            if not load_bundle or not AmplifierSession:
-                logger.error("Required capabilities not available")
+            if not AmplifierSession:
+                error = "Required capability 'session.AmplifierSession' not available"
+                logger.error(error)
+                self._append_spawn_error(issue_id, error)
                 return
             
-            # Load worker bundle
-            logger.debug(f"Loading bundle: {worker_bundle}")
-            bundle = await load_bundle(worker_bundle)
-            if not bundle:
-                logger.error(f"Failed to load bundle: {worker_bundle}")
+            # Load worker bundle with detailed logging and error handling
+            logger.debug(f"Loading bundle: {worker_bundle} (cwd: {os.getcwd()})")
+            try:
+                bundle = await load_bundle(worker_bundle)
+                if not bundle:
+                    error = f"Bundle loaded but returned None: {worker_bundle}"
+                    logger.error(error)
+                    self._append_spawn_error(issue_id, error)
+                    return
+            except Exception as e:
+                error = f"Error loading bundle '{worker_bundle}': {str(e)}"
+                logger.error(error, exc_info=True)
+                self._append_spawn_error(issue_id, error)
                 return
+                
+            logger.debug(f"Successfully loaded bundle: {worker_bundle}")
             
-            # Get parent session ID
-            parent_session_id = getattr(self._coordinator.session, "id", None)
+            # Get parent session ID with improved fallbacks
+            parent_session_id = None
+            if hasattr(self._coordinator, "session"):
+                if hasattr(self._coordinator.session, "id"):
+                    parent_session_id = self._coordinator.session.id
+                elif hasattr(self._coordinator.session, "session_id"):
+                    parent_session_id = self._coordinator.session.session_id
+                elif hasattr(self._coordinator.session, "get_id"):
+                    try:
+                        parent_session_id = self._coordinator.session.get_id()
+                    except Exception as e:
+                        logger.debug(f"Error calling get_id(): {e}")
+
             if not parent_session_id:
-                logger.error("Cannot access parent session ID")
+                error = "Cannot access parent session ID through any known method"
+                logger.error(error)
+                self._append_spawn_error(issue_id, error)
                 return
+                
+            logger.debug(f"Using parent session ID: {parent_session_id}")
                 
             # Create worker session with bundle config
             logger.debug(f"Creating worker session with parent_id={parent_session_id}")
@@ -416,7 +508,9 @@ If you need clarification, update the issue with status "pending_user_input".
             
             logger.info(f"Successfully spawned worker for issue {issue_id}")
         except Exception as e:
-            logger.error(f"Failed to spawn worker: {e}", exc_info=True)
+            error = f"Failed to spawn worker: {e}"
+            logger.error(error, exc_info=True)
+            self._append_spawn_error(issue_id, error)
 
     def _route_issue(self, issue: dict[str, Any]) -> dict[str, Any] | None:
         """Route issue to appropriate worker pool based on metadata."""
@@ -444,6 +538,96 @@ If you need clarification, update the issue with status "pending_user_input".
             if pool.get("name") == name:
                 return pool
         return None
+        
+    def _resolve_bundle_path(self, bundle_path: str) -> str:
+        """Ensure bundle path is fully resolved to prevent directory-specific issues.
+        
+        This method handles different types of bundle paths:
+        - git+https://... (absolute git URL)
+        - http://... (absolute HTTP URL) 
+        - file://... (absolute file URL)
+        - /absolute/path (absolute filesystem path)
+        - relative/path (relative path - may need resolution)
+        """
+        # Already absolute URL or path
+        if (bundle_path.startswith("git+") or 
+            bundle_path.startswith("http") or 
+            bundle_path.startswith("file:") or
+            bundle_path.startswith("/")):
+            return bundle_path
+            
+        # Try to find repository root for relative paths
+        repo_root = self._find_repo_root()
+        if repo_root:
+            # Resolve path relative to repo root
+            absolute_path = os.path.normpath(os.path.join(repo_root, bundle_path))
+            logger.debug(f"Resolved relative bundle path '{bundle_path}' to '{absolute_path}'")
+            return absolute_path
+            
+        # If we can't find repo root, return the path as-is but log a warning
+        logger.warning(f"Could not resolve relative bundle path '{bundle_path}' to absolute path")
+        return bundle_path
+        
+    def _find_repo_root(self) -> Optional[str]:
+        """Find the repository root directory from the current working directory."""
+        # Start from current directory
+        path = os.getcwd()
+        
+        # Walk up until we find .git or .amplifier directory
+        while path != '/':
+            if (os.path.exists(os.path.join(path, '.git')) or 
+                os.path.exists(os.path.join(path, '.amplifier'))):
+                return path
+            # Move up one directory
+            parent = os.path.dirname(path)
+            if parent == path:  # Reached root
+                break
+            path = parent
+                
+        # If coordinator has repo root capability, use that
+        if self._coordinator:
+            repo_root = self._coordinator.get_capability("repo.root_path")
+            if repo_root:
+                return repo_root
+                
+        return None
+        
+    def _append_spawn_error(self, issue_id: str, error: str) -> None:
+        """Add worker spawn error for reporting to user."""
+        if not hasattr(self, "_spawn_errors"):
+            self._spawn_errors = []
+            
+        error_msg = f"Issue #{issue_id}: {error}"
+        self._spawn_errors.append(error_msg)
+        
+        # Also update issue status to blocked
+        asyncio.create_task(self._update_issue_status_blocked(issue_id, error))
+        
+    async def _update_issue_status_blocked(self, issue_id: str, error: str) -> None:
+        """Update issue status to blocked with error message."""
+        # Get issue tool (may be called outside normal execution path)
+        if not hasattr(self, "_coordinator") or not self._coordinator:
+            logger.error("Cannot update issue status: coordinator not available")
+            return
+            
+        tools = getattr(self._coordinator, "tools", {})
+        issue_tool = tools.get("issue") or tools.get("tool-issue") or tools.get("issue_manager")
+        if not issue_tool:
+            logger.error("Cannot update issue status: issue tool not available")
+            return
+            
+        try:
+            await issue_tool.execute({
+                "operation": "update",
+                "params": {
+                    "issue_id": issue_id,
+                    "status": "blocked",
+                    "comment": f"Worker spawning failed: {error}"
+                }
+            })
+            logger.info(f"Updated issue #{issue_id} status to blocked")
+        except Exception as e:
+            logger.error(f"Failed to update issue #{issue_id} status: {e}")
 
     async def _check_worker_progress(self, issue_tool: Any) -> str:
         """Check for completed or blocked issues from workers."""

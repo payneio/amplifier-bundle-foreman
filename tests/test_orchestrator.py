@@ -1,6 +1,8 @@
 """Tests for ForemanOrchestrator."""
 
+import os
 import pytest
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Use a relative import to the local module
@@ -341,3 +343,151 @@ async def test_maybe_spawn_worker_bundle_load_failure(orchestrator, mock_tools):
     
     # Verify session was NOT created (because bundle load failed)
     mock_amplifier_session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_subdirectory_execution():
+    """Test that orchestrator works correctly when run from a subdirectory."""
+    # Save the current working directory
+    original_dir = os.getcwd()
+    
+    try:
+        # Create a temporary directory to simulate a subdirectory
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Change to the subdirectory
+            os.chdir(temp_dir)
+            
+            # Create orchestrator with absolute bundle URLs (important for subdirectory execution)
+            config = {
+                "worker_pools": [
+                    {
+                        "name": "coding-pool",
+                        # Use absolute URL with git+ prefix
+                        "worker_bundle": "git+https://github.com/example/worker-bundle@main",
+                        "max_concurrent": 1,
+                        "route_types": ["task"]
+                    }
+                ],
+                "routing": {"default_pool": "coding-pool"}
+            }
+            
+            # Initialize orchestrator
+            orchestrator = ForemanOrchestrator(config)
+            
+            # Mock coordinator with required capabilities
+            mock_coordinator = MagicMock()
+            mock_session = MagicMock(id="test-session-id")
+            mock_coordinator.session = mock_session
+            
+            # Mock bundle loading
+            mock_load_bundle = AsyncMock(return_value=MockBundle({"test": "config"}))
+            mock_amplifier_session = MagicMock(return_value=MockSession())
+            tools = {"issue_manager": MockTool()}
+            
+            # Add tools to coordinator for error handling
+            mock_coordinator.tools = tools
+            
+            # Setup capabilities including repo root for absolute path resolution
+            mock_coordinator.get_capability.side_effect = lambda name: {
+                "bundle.load": mock_load_bundle,
+                "session.AmplifierSession": mock_amplifier_session,
+                "repo.root_path": original_dir  # Provide repo root path
+            }.get(name)
+            
+            # Set coordinator on orchestrator
+            orchestrator._coordinator = mock_coordinator
+            
+            # Patch asyncio.create_task to verify it's called
+            with patch('asyncio.create_task') as mock_create_task:
+                # Call spawn worker
+                await orchestrator._maybe_spawn_worker(
+                    {"issue": {"id": "test-subdir", "title": "Subdirectory Test", "metadata": {"type": "task"}}},
+                    tools["issue_manager"]
+                )
+                
+                # Verify bundle was loaded with the absolute URL
+                mock_load_bundle.assert_called_once_with("git+https://github.com/example/worker-bundle@main")
+                
+                # Verify session was created with correct parameters
+                mock_amplifier_session.assert_called_once()
+                assert mock_amplifier_session.call_args[1]["config"] == {"test": "config"}
+                assert mock_amplifier_session.call_args[1]["parent_id"] == "test-session-id"
+                
+                # Verify worker was spawned
+                assert mock_create_task.called
+                
+                # Verify no spawn errors were recorded
+                assert not hasattr(orchestrator, "_spawn_errors") or not orchestrator._spawn_errors
+    
+    finally:
+        # Restore original working directory
+        os.chdir(original_dir)
+
+
+@pytest.mark.asyncio
+async def test_relative_bundle_resolution():
+    """Test that relative bundle paths are correctly resolved."""
+    # Save the current working directory
+    original_dir = os.getcwd()
+    
+    try:
+        # Create a temporary directory to simulate a subdirectory
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Change to the subdirectory
+            os.chdir(temp_dir)
+            
+            # Create orchestrator with relative bundle path
+            config = {
+                "worker_pools": [
+                    {
+                        "name": "coding-pool",
+                        # Use relative path that needs resolution
+                        "worker_bundle": "workers/amplifier-bundle-coding-worker",
+                        "max_concurrent": 1,
+                        "route_types": ["task"]
+                    }
+                ],
+                "routing": {"default_pool": "coding-pool"}
+            }
+            
+            # Initialize orchestrator
+            orchestrator = ForemanOrchestrator(config)
+            
+            # Mock coordinator with required capabilities
+            mock_coordinator = MagicMock()
+            mock_session = MagicMock(id="test-session-id")
+            mock_coordinator.session = mock_session
+            
+            # Mock bundle loading
+            mock_load_bundle = AsyncMock(return_value=MockBundle({"test": "config"}))
+            mock_amplifier_session = MagicMock(return_value=MockSession())
+            tools = {"issue_manager": MockTool()}
+            
+            # Add tools to coordinator for error handling
+            mock_coordinator.tools = tools
+            
+            # Setup capabilities including repo root for absolute path resolution
+            mock_coordinator.get_capability.side_effect = lambda name: {
+                "bundle.load": mock_load_bundle,
+                "session.AmplifierSession": mock_amplifier_session,
+                "repo.root_path": original_dir  # Provide repo root path
+            }.get(name)
+            
+            # Set coordinator on orchestrator
+            orchestrator._coordinator = mock_coordinator
+            
+            # Call spawn worker
+            await orchestrator._maybe_spawn_worker(
+                {"issue": {"id": "test-relative", "title": "Relative Path Test", "metadata": {"type": "task"}}},
+                tools["issue_manager"]
+            )
+            
+            # Verify bundle was loaded with the resolved path
+            mock_load_bundle.assert_called_once()
+            # The resolved path should be the absolute path formed by joining repo root and relative path
+            expected_path = os.path.normpath(os.path.join(original_dir, "workers/amplifier-bundle-coding-worker"))
+            assert mock_load_bundle.call_args[0][0] == expected_path
+    
+    finally:
+        # Restore original working directory
+        os.chdir(original_dir)
