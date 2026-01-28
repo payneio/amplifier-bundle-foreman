@@ -495,18 +495,15 @@ If you need clarification, update the issue with status "pending_user_input".
 
             logger.debug(f"Using parent session ID: {parent_session_id}")
 
-            # Create worker session with bundle config and coordinator's capabilities
+            # Create worker session with bundle config and coordinator
             logger.debug(f"Creating worker session with parent_id={parent_session_id}")
 
-            # Get coordinator's capabilities to pass to worker
-            session_capabilities = {}
-            for attr in dir(self._coordinator):
-                if attr.startswith("get_capability") or attr in ["bundle", "session", "tools"]:
-                    session_capabilities[attr] = getattr(self._coordinator, attr)
-
-            # Create worker session with capabilities
+            # DIRECT APPROACH: Simply pass the entire coordinator to the worker
+            # This ensures all capabilities, tools, bundles and context are available
             worker_session = AmplifierSession(
-                config=bundle.config, parent_id=parent_session_id, capabilities=session_capabilities
+                config=bundle.config,
+                parent_id=parent_session_id,
+                coordinator=self._coordinator,  # Pass the entire coordinator instead of capabilities
             )
 
             # Run worker session in background
