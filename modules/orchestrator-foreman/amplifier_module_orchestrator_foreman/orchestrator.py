@@ -431,11 +431,23 @@ If you need clarification, update the issue with status "pending_user_input".
 
         # Spawn worker (fire and forget)
         try:
+            # Try multiple approaches to get session ID
+            session_id = None
+            if hasattr(self._coordinator, "session_id"):
+                session_id = self._coordinator.session_id
+            elif hasattr(self._coordinator.session, "session_id"):
+                session_id = self._coordinator.session.session_id
+            elif hasattr(self._coordinator.session, "get_id"):
+                session_id = self._coordinator.session.get_id()
+            else:
+                # Fall back to string representation which might contain the ID
+                session_id = str(self._coordinator.session)
+                
             asyncio.create_task(
                 spawn(
                     agent_name=worker_agent,
                     instruction=worker_prompt,
-                    parent_session=self._coordinator.session.id,  # Pass session ID string, not session object
+                    parent_session=session_id,  # Pass session ID string, not session object
                     agent_configs=WORKER_AGENT_CONFIGS,
                 )
             )
