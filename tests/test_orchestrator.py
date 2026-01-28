@@ -582,6 +582,133 @@ async def test_worker_session_initialization():
 
 
 @pytest.mark.asyncio
+async def test_capabilities_passed_to_worker_session():
+    """Test that capabilities are properly passed from parent to worker sessions.
+
+    This test verifies that the fix for capability propagation works correctly,
+    specifically testing that session_capabilities containing crucial capabilities
+    like bundle.load and tools are passed from coordinator to worker sessions.
+    """
+    # Create orchestrator with test config
+    config = {
+        "worker_pools": [
+            {
+                "name": "test-pool",
+                "worker_bundle": "git+https://example.com/test-worker",
+                "max_concurrent": 3,
+                "route_types": ["test"],
+            }
+        ],
+        "routing": {"default_pool": "test-pool"},
+    }
+    orchestrator = ForemanOrchestrator(config)
+
+    # Create a specialized worker session class that verifies capabilities
+    class CapabilityCheckingSession:
+        def __init__(self, config=None, parent_id=None, capabilities=None):
+            self.config = config
+            self.parent_id = parent_id
+            self.capabilities = capabilities or {}
+            self.is_initialized = False
+            self.prompt = None
+
+        async def initialize(self):
+            self.is_initialized = True
+
+        async def run(self, prompt):
+            self.prompt = prompt
+            return "Worker session with capabilities completed"
+
+    # Mock coordinator with rich capabilities
+    mock_coordinator = MagicMock()
+    mock_coordinator.session = MagicMock(id="parent-session-456")
+
+    # Create test tools
+    test_issue_tool = MagicMock()
+    tools = {"issue_manager": test_issue_tool, "tool-bash": MagicMock()}
+
+    # Create test capabilities
+    test_get_capability = MagicMock()
+    test_bundle_load = AsyncMock(return_value=MockBundle({"test": "config"}))
+
+    # Set attributes on coordinator that should be passed
+    mock_coordinator.tools = tools
+    mock_coordinator.get_capability = test_get_capability
+    mock_coordinator.bundle = MagicMock()
+
+    # Make get_capability return our test function for bundle.load
+    test_get_capability.side_effect = lambda name: {
+        "bundle.load": test_bundle_load,
+        "session.AmplifierSession": MagicMock(return_value=CapabilityCheckingSession()),
+    }.get(name)
+
+    # Set coordinator on orchestrator
+    orchestrator._coordinator = mock_coordinator
+
+    # Use our patch to capture the actual session created
+    captured_session = None
+    original_amplifier_session = None
+
+    # Define a patched session constructor that captures args and returns our session
+    def mock_amplifier_session(*args, **kwargs):
+        nonlocal captured_session, original_amplifier_session
+        # Create a test session that will verify capabilities
+        our_session = CapabilityCheckingSession(
+            config=kwargs.get("config"),
+            parent_id=kwargs.get("parent_id"),
+            capabilities=kwargs.get("capabilities"),
+        )
+        # Store the kwargs for verification
+        captured_session = kwargs
+        return our_session
+
+    # Setup mock AmplifierSession
+    mock_session_constructor = MagicMock(side_effect=mock_amplifier_session)
+
+    # Override get_capability to return our session constructor
+    def get_capability_with_session(name):
+        if name == "session.AmplifierSession":
+            return mock_session_constructor
+        return {
+            "bundle.load": test_bundle_load,
+        }.get(name)
+
+    test_get_capability.side_effect = get_capability_with_session
+
+    # Use patch for asyncio.create_task to allow our test to fully execute
+    with patch("asyncio.create_task", side_effect=lambda coro: asyncio.ensure_future(coro)):
+        # Call spawn worker with issue data
+        await orchestrator._maybe_spawn_worker(
+            {
+                "issue": {
+                    "id": "test-capabilities",
+                    "title": "Capability Test Issue",
+                    "metadata": {"type": "test"},
+                }
+            },
+            test_issue_tool,
+        )
+
+        # Wait for tasks to complete (short wait is fine for test)
+        await asyncio.sleep(0.1)
+
+    # Verify the session was created with capabilities
+    assert captured_session is not None, "Worker session was not created"
+    assert "capabilities" in captured_session, "capabilities parameter not passed to worker session"
+
+    # Verify specific capabilities were passed
+    capabilities = captured_session.get("capabilities", {})
+    assert "get_capability" in capabilities, "get_capability not passed to worker"
+    assert "tools" in capabilities, "tools not passed to worker"
+    assert "bundle" in capabilities, "bundle not passed to worker"
+
+    # Verify the structure matches what we expect from our fix
+    assert mock_session_constructor.call_count == 1, (
+        "AmplifierSession constructor not called exactly once"
+    )
+
+
+@pytest.mark.asyncio
 async def test_end_to_end_worker_lifecycle():
     """End-to-end test of the entire worker session lifecycle including initialization.
 
@@ -638,8 +765,10 @@ async def test_end_to_end_worker_lifecycle():
     mock_coordinator.session = MagicMock(id="parent-session-123")
 
     # We'll provide a real worker session implementation with proper config
-    worker_session = RealisticWorkerSession(config={"worker": "config"}, parent_id="parent-session-123")
-    
+    worker_session = RealisticWorkerSession(
+        config={"worker": "config"}, parent_id="parent-session-123"
+    )
+
     # Mock AmplifierSession to return our pre-configured worker session
     mock_amplifier_session = MagicMock()
     mock_amplifier_session.return_value = worker_session

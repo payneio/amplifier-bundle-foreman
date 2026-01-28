@@ -9,8 +9,7 @@ import asyncio
 import json
 import logging
 import os
-import sys
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from amplifier_core import HookRegistry, ToolSpec
 from amplifier_core.message_models import ChatRequest, Message
@@ -89,45 +88,47 @@ class ForemanOrchestrator:
 
         # Track spawned workers to avoid duplicates
         self._spawned_issues: set[str] = set()
-        
+
         # Track worker spawn errors for reporting to user
-        self._spawn_errors: List[str] = []
+        self._spawn_errors: list[str] = []
 
         # Store coordinator for worker spawning
         self._coordinator: Any = None
-        
+
         # Validate configuration
         self._validate_config()
-        
+
     def _validate_config(self) -> None:
         """Validate orchestrator configuration and log warnings for issues."""
         # Check if worker pools are configured
         if not self.worker_pools:
-            logger.warning("No worker pools configured - the foreman will not be able to spawn workers")
+            logger.warning(
+                "No worker pools configured - the foreman will not be able to spawn workers"
+            )
             return
-            
+
         # Validate each pool configuration
         for i, pool in enumerate(self.worker_pools):
             pool_name = pool.get("name", f"pool-{i}")
-            
+
             # Check for worker_bundle
             if not pool.get("worker_bundle"):
                 logger.warning(f"Worker pool '{pool_name}' is missing worker_bundle configuration")
-            
+
             # Check if worker_bundle is a full URL (recommended)
             worker_bundle = pool.get("worker_bundle", "")
             if worker_bundle and not (
-                worker_bundle.startswith("git+") or 
-                worker_bundle.startswith("http") or
-                worker_bundle.startswith("file:") or
-                worker_bundle.startswith("/")
+                worker_bundle.startswith("git+")
+                or worker_bundle.startswith("http")
+                or worker_bundle.startswith("file:")
+                or worker_bundle.startswith("/")
             ):
                 logger.warning(
                     f"Worker pool '{pool_name}' uses a relative worker_bundle path '{worker_bundle}'. "
                     "This may cause issues when running from different directories. "
                     "Consider using full URLs like 'git+https://...'"
                 )
-                
+
             # Check for name (required for routing)
             if not pool.get("name"):
                 logger.warning(f"Worker pool #{i} is missing a name - routing may fail")
@@ -163,7 +164,7 @@ class ForemanOrchestrator:
         progress_report = ""
         if issue_tool:
             progress_report = await self._check_worker_progress(issue_tool)
-            
+
         # Add spawn errors to progress report if any exist
         if hasattr(self, "_spawn_errors") and self._spawn_errors:
             if progress_report:
@@ -382,9 +383,8 @@ class ForemanOrchestrator:
             return
 
         self._spawned_issues.add(issue_id)
-        
-        # Track errors for reporting back to user
-        errors = []
+
+        # No need to track errors here as we use _append_spawn_error
 
         # Route to appropriate worker pool
         pool_config = self._route_issue(issue)
@@ -401,7 +401,7 @@ class ForemanOrchestrator:
             logger.warning(error)
             self._append_spawn_error(issue_id, error)
             return
-            
+
         # Ensure worker_bundle is properly resolved
         worker_bundle = self._resolve_bundle_path(worker_bundle)
         logger.info(f"Resolved worker bundle path: {worker_bundle}")
@@ -441,7 +441,7 @@ If you need clarification, update the issue with status "pending_user_input".
         # Spawn worker using direct bundle loading
         try:
             logger.info(f"Spawning worker for issue {issue_id} using bundle {worker_bundle}")
-            
+
             # Get foundation primitives with enhanced verification
             load_bundle = self._coordinator.get_capability("bundle.load")
             if not load_bundle:
@@ -449,14 +449,14 @@ If you need clarification, update the issue with status "pending_user_input".
                 logger.error(error)
                 self._append_spawn_error(issue_id, error)
                 return
-                
+
             AmplifierSession = self._coordinator.get_capability("session.AmplifierSession")
             if not AmplifierSession:
                 error = "Required capability 'session.AmplifierSession' not available"
                 logger.error(error)
                 self._append_spawn_error(issue_id, error)
                 return
-            
+
             # Load worker bundle with detailed logging and error handling
             logger.debug(f"Loading bundle: {worker_bundle} (cwd: {os.getcwd()})")
             try:
@@ -471,9 +471,9 @@ If you need clarification, update the issue with status "pending_user_input".
                 logger.error(error, exc_info=True)
                 self._append_spawn_error(issue_id, error)
                 return
-                
+
             logger.debug(f"Successfully loaded bundle: {worker_bundle}")
-            
+
             # Get parent session ID with improved fallbacks
             parent_session_id = None
             if hasattr(self._coordinator, "session"):
@@ -492,30 +492,39 @@ If you need clarification, update the issue with status "pending_user_input".
                 logger.error(error)
                 self._append_spawn_error(issue_id, error)
                 return
-                
+
             logger.debug(f"Using parent session ID: {parent_session_id}")
-                
-            # Create worker session with bundle config
+
+            # Create worker session with bundle config and coordinator's capabilities
             logger.debug(f"Creating worker session with parent_id={parent_session_id}")
+
+            # Get coordinator's capabilities to pass to worker
+            session_capabilities = {}
+            for attr in dir(self._coordinator):
+                if attr.startswith("get_capability") or attr in ["bundle", "session", "tools"]:
+                    session_capabilities[attr] = getattr(self._coordinator, attr)
+
+            # Create worker session with capabilities
             worker_session = AmplifierSession(
-                config=bundle.config,
-                parent_id=parent_session_id
+                config=bundle.config, parent_id=parent_session_id, capabilities=session_capabilities
             )
-            
+
             # Run worker session in background
             logger.info(f"Running worker session for issue {issue_id}")
-            asyncio.create_task(self._initialize_and_run_worker(worker_session, worker_prompt, issue_id))
-            
+            asyncio.create_task(
+                self._initialize_and_run_worker(worker_session, worker_prompt, issue_id)
+            )
+
             logger.info(f"Successfully spawned worker for issue {issue_id}")
         except Exception as e:
             # Handle any errors from the main worker spawning process
             error = f"Failed to spawn worker: {e}"
             logger.error(error, exc_info=True)
             self._append_spawn_error(issue_id, error)
-    
+
     async def _initialize_and_run_worker(self, worker_session, worker_prompt, issue_id):
         """Initialize session and run with proper error handling.
-        
+
         This method ensures that session is properly initialized before running.
         AmplifierSession requires explicit initialization to mount modules and
         configure the session before execution.
@@ -524,7 +533,7 @@ If you need clarification, update the issue with status "pending_user_input".
             # First, explicitly initialize the session
             logger.info(f"Initializing worker session for issue {issue_id}")
             await worker_session.initialize()
-            
+
             # After initialization completes, run the session
             logger.info(f"Worker session initialized, running with prompt for issue {issue_id}")
             return await worker_session.run(worker_prompt)
@@ -560,24 +569,26 @@ If you need clarification, update the issue with status "pending_user_input".
             if pool.get("name") == name:
                 return pool
         return None
-        
+
     def _resolve_bundle_path(self, bundle_path: str) -> str:
         """Ensure bundle path is fully resolved to prevent directory-specific issues.
-        
+
         This method handles different types of bundle paths:
         - git+https://... (absolute git URL)
-        - http://... (absolute HTTP URL) 
+        - http://... (absolute HTTP URL)
         - file://... (absolute file URL)
         - /absolute/path (absolute filesystem path)
         - relative/path (relative path - may need resolution)
         """
         # Already absolute URL or path
-        if (bundle_path.startswith("git+") or 
-            bundle_path.startswith("http") or 
-            bundle_path.startswith("file:") or
-            bundle_path.startswith("/")):
+        if (
+            bundle_path.startswith("git+")
+            or bundle_path.startswith("http")
+            or bundle_path.startswith("file:")
+            or bundle_path.startswith("/")
+        ):
             return bundle_path
-            
+
         # Try to find repository root for relative paths
         repo_root = self._find_repo_root()
         if repo_root:
@@ -585,68 +596,71 @@ If you need clarification, update the issue with status "pending_user_input".
             absolute_path = os.path.normpath(os.path.join(repo_root, bundle_path))
             logger.debug(f"Resolved relative bundle path '{bundle_path}' to '{absolute_path}'")
             return absolute_path
-            
+
         # If we can't find repo root, return the path as-is but log a warning
         logger.warning(f"Could not resolve relative bundle path '{bundle_path}' to absolute path")
         return bundle_path
-        
-    def _find_repo_root(self) -> Optional[str]:
+
+    def _find_repo_root(self) -> str | None:
         """Find the repository root directory from the current working directory."""
         # Start from current directory
         path = os.getcwd()
-        
+
         # Walk up until we find .git or .amplifier directory
-        while path != '/':
-            if (os.path.exists(os.path.join(path, '.git')) or 
-                os.path.exists(os.path.join(path, '.amplifier'))):
+        while path != "/":
+            if os.path.exists(os.path.join(path, ".git")) or os.path.exists(
+                os.path.join(path, ".amplifier")
+            ):
                 return path
             # Move up one directory
             parent = os.path.dirname(path)
             if parent == path:  # Reached root
                 break
             path = parent
-                
+
         # If coordinator has repo root capability, use that
         if self._coordinator:
             repo_root = self._coordinator.get_capability("repo.root_path")
             if repo_root:
                 return repo_root
-                
+
         return None
-        
+
     def _append_spawn_error(self, issue_id: str, error: str) -> None:
         """Add worker spawn error for reporting to user."""
         if not hasattr(self, "_spawn_errors"):
             self._spawn_errors = []
-            
+
         error_msg = f"Issue #{issue_id}: {error}"
         self._spawn_errors.append(error_msg)
-        
+
         # Also update issue status to blocked
         asyncio.create_task(self._update_issue_status_blocked(issue_id, error))
-        
+
     async def _update_issue_status_blocked(self, issue_id: str, error: str) -> None:
         """Update issue status to blocked with error message."""
         # Get issue tool (may be called outside normal execution path)
         if not hasattr(self, "_coordinator") or not self._coordinator:
             logger.error("Cannot update issue status: coordinator not available")
             return
-            
+
         tools = getattr(self._coordinator, "tools", {})
         issue_tool = tools.get("issue") or tools.get("tool-issue") or tools.get("issue_manager")
         if not issue_tool:
             logger.error("Cannot update issue status: issue tool not available")
             return
-            
+
         try:
-            await issue_tool.execute({
-                "operation": "update",
-                "params": {
-                    "issue_id": issue_id,
-                    "status": "blocked",
-                    "comment": f"Worker spawning failed: {error}"
+            await issue_tool.execute(
+                {
+                    "operation": "update",
+                    "params": {
+                        "issue_id": issue_id,
+                        "status": "blocked",
+                        "comment": f"Worker spawning failed: {error}",
+                    },
                 }
-            })
+            )
             logger.info(f"Updated issue #{issue_id} status to blocked")
         except Exception as e:
             logger.error(f"Failed to update issue #{issue_id} status: {e}")
