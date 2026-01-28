@@ -504,9 +504,30 @@ If you need clarification, update the issue with status "pending_user_input".
             
             # Run worker session in background
             logger.info(f"Running worker session for issue {issue_id}")
-            asyncio.create_task(worker_session.run(worker_prompt))
+            asyncio.create_task(self._initialize_and_run_worker(worker_session, worker_prompt, issue_id))
             
             logger.info(f"Successfully spawned worker for issue {issue_id}")
+    
+    async def _initialize_and_run_worker(self, worker_session, worker_prompt, issue_id):
+        """Initialize session and run with proper error handling.
+        
+        This method ensures that session is properly initialized before running.
+        AmplifierSession requires explicit initialization to mount modules and
+        configure the session before execution.
+        """
+        try:
+            # First, explicitly initialize the session
+            logger.info(f"Initializing worker session for issue {issue_id}")
+            await worker_session.initialize()
+            
+            # After initialization completes, run the session
+            logger.info(f"Worker session initialized, running with prompt for issue {issue_id}")
+            return await worker_session.run(worker_prompt)
+        except Exception as e:
+            error_msg = f"Worker execution failed for issue {issue_id}: {e}"
+            logger.error(error_msg, exc_info=True)
+            self._append_spawn_error(issue_id, f"Worker execution failed: {e}")
+            return f"Error: {e}"
         except Exception as e:
             error = f"Failed to spawn worker: {e}"
             logger.error(error, exc_info=True)
