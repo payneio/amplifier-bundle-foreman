@@ -15,53 +15,6 @@ from amplifier_core.message_models import ChatRequest, Message
 
 logger = logging.getLogger(__name__)
 
-# Worker agent configurations - defined inline to ensure availability during spawn
-# These configurations tell the spawn system how to set up each worker type
-WORKER_AGENT_CONFIGS = {
-    "foreman:coding-worker": {
-        "description": "Coding worker for implementation tasks",
-        "bundle": "git+https://github.com/microsoft/amplifier-foundation@main",
-        "instructions": """You are a coding worker. Complete the assigned issue and update its status.
-
-When done, use the issue_manager tool with:
-- operation: "update"
-- params:
-  - issue_id: [the issue ID from your assignment]
-  - status: "completed"
-  - description: [summary of what you did]
-
-If you need clarification, update the issue with status "pending_user_input".""",
-    },
-    "foreman:research-worker": {
-        "description": "Research worker for analysis tasks",
-        "bundle": "git+https://github.com/microsoft/amplifier-foundation@main",
-        "instructions": """You are a research worker. Investigate the assigned issue thoroughly.
-
-When done, use the issue_manager tool with:
-- operation: "update"
-- params:
-  - issue_id: [the issue ID from your assignment]
-  - status: "completed"
-  - description: [your findings and analysis]
-
-If you need clarification, update the issue with status "pending_user_input".""",
-    },
-    "foreman:testing-worker": {
-        "description": "Testing worker for QA tasks",
-        "bundle": "git+https://github.com/microsoft/amplifier-foundation@main",
-        "instructions": """You are a testing worker. Verify the assigned issue.
-
-When done, use the issue_manager tool with:
-- operation: "update"
-- params:
-  - issue_id: [the issue ID from your assignment]
-  - status: "completed"
-  - description: [test results and findings]
-
-If you need clarification, update the issue with status "pending_user_input".""",
-    },
-}
-
 # System prompt that makes the LLM act as a foreman
 FOREMAN_SYSTEM_PROMPT = """You are a FOREMAN - a work coordinator who delegates tasks to specialized workers.
 
@@ -372,7 +325,7 @@ class ForemanOrchestrator:
         return results
 
     async def _maybe_spawn_worker(self, issue_result: dict[str, Any], issue_tool: Any) -> None:
-        """Spawn a worker for a newly created issue."""
+        """Spawn a worker for a newly created issue using direct bundle loading."""
         issue = issue_result.get("issue", {})
         issue_id = issue.get("id")
 
@@ -387,16 +340,10 @@ class ForemanOrchestrator:
             logger.warning(f"No worker pool for issue {issue_id}")
             return
 
-        # Get worker agent name
-        worker_agent = pool_config.get("worker_agent")
-        if not worker_agent:
-            logger.warning(f"No worker_agent configured for pool {pool_config.get('name')}")
-            return
-
-        # Get spawn capability
-        spawn = self._coordinator.get_capability("session.spawn") if self._coordinator else None
-        if not spawn:
-            logger.warning("session.spawn capability not available")
+        # Get worker bundle path
+        worker_bundle = pool_config.get("worker_bundle")
+        if not worker_bundle:
+            logger.warning(f"No worker_bundle configured for pool {pool_config.get('name')}")
             return
 
         # Build worker prompt
@@ -431,21 +378,45 @@ If you need clarification, update the issue with status "pending_user_input".
         except Exception as e:
             logger.error(f"Failed to update issue status: {e}")
 
-        # Spawn worker (fire and forget)
+        # Spawn worker using direct bundle loading
         try:
-            # Direct access to session_id property which is the correct attribute name
-            # (not id, not session.id, but session.session_id)
-            asyncio.create_task(
-                spawn(
-                    agent_name=worker_agent,
-                    instruction=worker_prompt,
-                    parent_session=self._coordinator.session.session_id,  # Correct property name
-                    agent_configs=WORKER_AGENT_CONFIGS,
-                )
+            logger.info(f"Spawning worker for issue {issue_id} using bundle {worker_bundle}")
+            
+            # Get foundation primitives
+            load_bundle = self._coordinator.get_capability("bundle.load")
+            AmplifierSession = self._coordinator.get_capability("session.AmplifierSession")
+            
+            if not load_bundle or not AmplifierSession:
+                logger.error("Required capabilities not available")
+                return
+            
+            # Load worker bundle
+            logger.debug(f"Loading bundle: {worker_bundle}")
+            bundle = await load_bundle(worker_bundle)
+            if not bundle:
+                logger.error(f"Failed to load bundle: {worker_bundle}")
+                return
+            
+            # Get parent session ID
+            parent_session_id = getattr(self._coordinator.session, "id", None)
+            if not parent_session_id:
+                logger.error("Cannot access parent session ID")
+                return
+                
+            # Create worker session with bundle config
+            logger.debug(f"Creating worker session with parent_id={parent_session_id}")
+            worker_session = AmplifierSession(
+                config=bundle.config,
+                parent_id=parent_session_id
             )
-            logger.info(f"Spawned worker {worker_agent} for issue {issue_id}")
+            
+            # Run worker session in background
+            logger.info(f"Running worker session for issue {issue_id}")
+            asyncio.create_task(worker_session.run(worker_prompt))
+            
+            logger.info(f"Successfully spawned worker for issue {issue_id}")
         except Exception as e:
-            logger.error(f"Failed to spawn worker: {e}")
+            logger.error(f"Failed to spawn worker: {e}", exc_info=True)
 
     def _route_issue(self, issue: dict[str, Any]) -> dict[str, Any] | None:
         """Route issue to appropriate worker pool based on metadata."""

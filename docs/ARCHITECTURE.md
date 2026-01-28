@@ -10,7 +10,7 @@ The Foreman bundle provides conversational autonomous work orchestration through
 
 ## Components
 
-### 1. Issue Queue (from amplifier-bundle-issues)
+### 1. Issue Queue (from amplifier-bundle-issues, issues behavior)
 
 Persistent issue tracking with statuses:
 - `open` - Ready for assignment
@@ -36,8 +36,12 @@ The orchestrator spawns workers directly using kernel/foundation primitives:
 # Load worker bundle
 bundle = await load_bundle(worker_bundle_path)
 
-# Create new session with worker config
-worker_session = AmplifierSession(config=bundle.config)
+# Create new session with worker config and parent relationship
+parent_session_id = getattr(self._coordinator.session, "id", None)
+worker_session = AmplifierSession(
+    config=bundle.config,
+    parent_id=parent_session_id
+)
 
 # Execute in background (fire-and-forget)
 asyncio.create_task(worker_session.run(worker_prompt))

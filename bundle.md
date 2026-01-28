@@ -18,17 +18,17 @@ session:
       # Valid issue_types: task, feature, bug, epic, chore
       worker_pools:
         - name: coding-pool
-          worker_agent: foreman:coding-worker
+          worker_bundle: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=workers/amplifier-bundle-coding-worker
           max_concurrent: 3
           route_types: [task, feature, bug]
         
         - name: research-pool
-          worker_agent: foreman:research-worker
+          worker_bundle: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=workers/amplifier-bundle-research-worker
           max_concurrent: 2
           route_types: [epic]
         
         - name: testing-pool
-          worker_agent: foreman:testing-worker
+          worker_bundle: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=workers/amplifier-bundle-testing-worker
           max_concurrent: 2
           route_types: [chore]
       
