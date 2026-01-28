@@ -165,7 +165,7 @@ class ForemanOrchestrator:
         provider = providers[provider_name]
 
         # Check for worker updates before processing
-        issue_tool = tools.get("issue_manager")
+        issue_tool = tools.get("issue") or tools.get("tool-issue") or tools.get("issue_manager")
         progress_report = ""
         if issue_tool:
             progress_report = await self._check_worker_progress(issue_tool)
@@ -334,7 +334,9 @@ class ForemanOrchestrator:
                 output = result.output if hasattr(result, "output") else str(result)
 
                 # If this was an issue creation, spawn a worker
-                if tc.name == "issue_manager" and tc.arguments.get("operation") == "create":
+                if (
+                    tc.name == "issue_manager" or tc.name == "tool-issue" or tc.name == "issue"
+                ) and tc.arguments.get("operation") == "create":
                     if isinstance(output, dict):
                         await self._maybe_spawn_worker(output, issue_tool)
 
