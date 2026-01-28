@@ -507,6 +507,11 @@ If you need clarification, update the issue with status "pending_user_input".
             asyncio.create_task(self._initialize_and_run_worker(worker_session, worker_prompt, issue_id))
             
             logger.info(f"Successfully spawned worker for issue {issue_id}")
+        except Exception as e:
+            # Handle any errors from the main worker spawning process
+            error = f"Failed to spawn worker: {e}"
+            logger.error(error, exc_info=True)
+            self._append_spawn_error(issue_id, error)
     
     async def _initialize_and_run_worker(self, worker_session, worker_prompt, issue_id):
         """Initialize session and run with proper error handling.
@@ -528,10 +533,6 @@ If you need clarification, update the issue with status "pending_user_input".
             logger.error(error_msg, exc_info=True)
             self._append_spawn_error(issue_id, f"Worker execution failed: {e}")
             return f"Error: {e}"
-        except Exception as e:
-            error = f"Failed to spawn worker: {e}"
-            logger.error(error, exc_info=True)
-            self._append_spawn_error(issue_id, error)
 
     def _route_issue(self, issue: dict[str, Any]) -> dict[str, Any] | None:
         """Route issue to appropriate worker pool based on metadata."""
