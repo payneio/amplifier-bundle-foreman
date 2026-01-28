@@ -435,7 +435,7 @@ If you need clarification, update the issue with status "pending_user_input".
                 spawn(
                     agent_name=worker_agent,
                     instruction=worker_prompt,
-                    parent_session=self._coordinator.session,
+                    parent_session=self._coordinator.session.id,  # Pass session ID string, not session object
                     agent_configs=WORKER_AGENT_CONFIGS,
                 )
             )
