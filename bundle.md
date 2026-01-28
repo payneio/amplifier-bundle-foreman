@@ -45,13 +45,6 @@ session:
   context:
     module: context-simple
     source: git+https://github.com/microsoft/amplifier-module-context-simple@main
-
-# Worker agents loaded from agents/ directory
-agents:
-  include:
-    - foreman:coding-worker
-    - foreman:research-worker
-    - foreman:testing-worker
 ---
 
 # Foreman Orchestrator
