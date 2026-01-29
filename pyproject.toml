@@ -11,10 +11,13 @@ license = { text = "MIT" }
 authors = [
     { name = "Amplifier Team" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "amplifier-core>=0.1.0",
 ]
+
+[tool.uv.sources]
+amplifier-core = { git = "https://github.com/microsoft/amplifier-core", branch = "main" }
 
 [project.optional-dependencies]
 dev = [
