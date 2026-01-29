@@ -562,6 +562,18 @@ If you are blocked, update the issue with status "blocked" and explain what's bl
                 display_system=display_system,
             )
 
+            # Inherit working directory from parent so tools use same paths
+            # Critical for issue_manager which uses relative path .amplifier/issues
+            if parent_session:
+                parent_working_dir = parent_session.coordinator.get_capability(
+                    "session.working_dir"
+                )
+                if parent_working_dir:
+                    worker_session.coordinator.register_capability(
+                        "session.working_dir", parent_working_dir
+                    )
+                    logger.info(f"Inherited working_dir from parent: {parent_working_dir}")
+
             try:
                 # Execute the worker instruction
                 logger.info(f"Executing worker for issue {issue_id}")
