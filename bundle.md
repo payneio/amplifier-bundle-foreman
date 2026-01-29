@@ -4,10 +4,10 @@ bundle:
   version: 1.0.0
   description: Standalone work orchestration bundle - delegates all work to workers
 
-# NO foundation include - this is a standalone bundle with minimal tools
-# Workers inherit from foundation when spawned
+# Minimal includes - workers inherit full foundation when spawned
 includes:
   - bundle: git+https://github.com/microsoft/amplifier-bundle-issues@main#subdirectory=behaviors/issues.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=behaviors/logging.yaml
 
 session:
   orchestrator:
