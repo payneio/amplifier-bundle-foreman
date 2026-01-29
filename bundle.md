@@ -7,7 +7,6 @@ bundle:
 # NO foundation include - this is a standalone bundle with minimal tools
 # Workers inherit from foundation when spawned
 includes:
-  - bundle: git_https://github.com/microsoft/amplifier-foundation@main@subdirectory=bundles/minimal.yaml
   - bundle: git+https://github.com/microsoft/amplifier-bundle-issues@main#subdirectory=behaviors/issues.yaml
 
 session:
@@ -32,6 +31,7 @@ session:
           worker_bundle: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=workers/amplifier-bundle-testing-worker
           max_concurrent: 2
           route_types: [chore]
+      extended_thinking: true
       
       routing:
         default_pool: coding-pool
@@ -46,6 +46,10 @@ session:
   context:
     module: context-simple
     source: git+https://github.com/microsoft/amplifier-module-context-simple@main
+    config:
+      max_tokens: 300000
+      compact_threshold: 0.8
+      auto_compact: true
 ---
 
 # Foreman Orchestrator
