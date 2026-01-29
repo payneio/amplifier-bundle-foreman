@@ -12,6 +12,7 @@ import os
 from typing import Any
 
 from amplifier_core import HookRegistry, ToolSpec
+from amplifier_core.events import ORCHESTRATOR_COMPLETE, PROMPT_SUBMIT
 from amplifier_core.message_models import ChatRequest, Message
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,18 @@ class ForemanOrchestrator:
         """
         self._coordinator = coordinator
 
+        # Emit prompt submit event (CRITICAL for session state management)
+        prompt_submit_result = await hooks.emit(PROMPT_SUBMIT, {"prompt": prompt})
+        if coordinator:
+            prompt_submit_result = await coordinator.process_hook_result(
+                prompt_submit_result, "prompt:submit", "orchestrator"
+            )
+            if prompt_submit_result.action == "deny":
+                return f"Operation denied: {prompt_submit_result.reason}"
+
+        # Emit execution start event
+        await hooks.emit("execution:start", {"prompt": prompt})
+
         # Add the user message to context at the start of execution
         # This ensures proper conversation state management
         await context.add_message({"role": "user", "content": prompt})
@@ -261,6 +274,19 @@ class ForemanOrchestrator:
 
         # Store conversation in context
         await self._update_context(context, prompt, final_response)
+
+        # Emit orchestrator complete event - CRITICAL for session state management
+        await hooks.emit(
+            ORCHESTRATOR_COMPLETE,
+            {
+                "orchestrator": "foreman",
+                "turn_count": iteration,
+                "status": "success" if final_response else "incomplete",
+            },
+        )
+
+        # Emit execution end event
+        await hooks.emit("execution:end", {})
 
         return final_response
 
