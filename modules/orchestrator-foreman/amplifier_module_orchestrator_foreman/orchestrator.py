@@ -441,19 +441,11 @@ class ForemanOrchestrator:
         worker_bundle = self._resolve_bundle_path(worker_bundle)
         logger.info(f"Resolved worker bundle path: {worker_bundle}")
 
-        # Mark issue as in_progress before spawning
-        try:
-            await issue_tool.execute(
-                {
-                    "operation": "update",
-                    "params": {
-                        "issue_id": issue_id,
-                        "status": "in_progress",
-                    },
-                }
-            )
-        except Exception as e:
-            logger.error(f"Failed to update issue status: {e}")
+        # NOTE: We intentionally do NOT set in_progress here.
+        # The worker will claim the issue when it starts, setting:
+        # - status: "in_progress"
+        # - assignee: worker session ID
+        # This provides accurate lifecycle tracking.
 
         # Build worker prompt
         worker_prompt = self._build_worker_prompt(issue)
@@ -492,16 +484,28 @@ class ForemanOrchestrator:
 
 {description}
 
-## Your Task
-1. Complete the work described above
-2. When done, use the issue_manager tool to update the issue:
-   - operation: "update"
-   - issue_id: "{issue_id}"
-   - status: "completed"
-   - Include a summary of what you did in the comment
+## Your Workflow
 
-If you need clarification, update the issue with status "pending_user_input".
-If you are blocked, update the issue with status "blocked" and explain what's blocking you.
+### Step 1: Claim the Issue (FIRST!)
+Before doing any work, claim this issue by updating it:
+```
+issue_manager operation="update" issue_id="{issue_id}" status="in_progress"
+```
+This tells the foreman you've started working on it.
+
+### Step 2: Complete the Work
+Do the work described in the issue above.
+
+### Step 3: Update Final Status
+When done, update the issue with your results:
+- **Success**: status="completed" with a summary of what you did
+- **Blocked**: status="blocked" with what's blocking you
+- **Need input**: status="pending_user_input" with your specific question
+
+## Important
+- Always claim the issue FIRST before starting work
+- Always update the issue status when you finish (success or failure)
+- Be specific in your status updates so the foreman can report progress
 """
 
     async def _run_spawn_and_handle_result(
