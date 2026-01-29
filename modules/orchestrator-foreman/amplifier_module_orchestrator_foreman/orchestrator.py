@@ -96,6 +96,15 @@ class ForemanOrchestrator:
         # Store coordinator for worker spawning
         self._coordinator: Any = None
 
+        # Track active worker tasks for recovery
+        self._worker_tasks: dict[str, asyncio.Task] = {}
+
+        # Recovery state - have we checked for orphaned issues?
+        self._recovery_done: bool = False
+
+        # Count of recovered workers (for user notification)
+        self._recovered_count: int = 0
+
         # Validate configuration
         self._validate_config()
 
@@ -133,6 +142,152 @@ class ForemanOrchestrator:
             # Check for name (required for routing)
             if not pool.get("name"):
                 logger.warning(f"Worker pool #{i} is missing a name - routing may fail")
+
+    def _spawn_worker_task(self, issue_id: str, coro) -> None:
+        """Spawn a worker as an asyncio task and track it.
+
+        Args:
+            issue_id: The issue ID this worker is handling
+            coro: The coroutine to run (from _run_spawn_and_handle_result)
+        """
+        task = asyncio.create_task(coro)
+        self._worker_tasks[issue_id] = task
+        self._spawned_issues.add(issue_id)
+
+        # Add completion callback to clean up
+        task.add_done_callback(lambda t: self._on_worker_complete(issue_id, t))
+
+        logger.debug(f"Spawned and tracking worker task for issue {issue_id}")
+
+    def _on_worker_complete(self, issue_id: str, task: asyncio.Task) -> None:
+        """Called when a worker task completes (success or failure).
+
+        This is a synchronous callback invoked by asyncio when the task finishes.
+        It handles cleanup and logs any exceptions.
+
+        Args:
+            issue_id: The issue ID the worker was handling
+            task: The completed asyncio.Task
+        """
+        try:
+            # Check for exceptions (this re-raises if there was one)
+            exc = task.exception()
+            if exc:
+                logger.error(f"Worker for issue {issue_id} failed with exception: {exc}")
+                # Note: Issue status update to "blocked" is handled in _run_spawn_and_handle_result
+        except asyncio.CancelledError:
+            logger.warning(f"Worker for issue {issue_id} was cancelled (likely CLI exit)")
+        except asyncio.InvalidStateError:
+            # Task not done yet - shouldn't happen in done callback
+            logger.warning(f"Worker task for issue {issue_id} in unexpected state")
+
+        # Remove from active tasks (keep in _spawned_issues for reference)
+        self._worker_tasks.pop(issue_id, None)
+        logger.debug(
+            f"Worker task for issue {issue_id} cleaned up, "
+            f"{len(self._worker_tasks)} tasks remaining"
+        )
+
+    def get_worker_status(self) -> dict[str, str]:
+        """Get status of all tracked worker tasks.
+
+        Returns:
+            Dict mapping issue_id to status string:
+            - "running": Task is still executing
+            - "completed": Task finished successfully
+            - "failed": Task raised an exception
+            - "cancelled": Task was cancelled
+        """
+        status = {}
+        for issue_id, task in self._worker_tasks.items():
+            if task.done():
+                if task.cancelled():
+                    status[issue_id] = "cancelled"
+                elif task.exception():
+                    status[issue_id] = "failed"
+                else:
+                    status[issue_id] = "completed"
+            else:
+                status[issue_id] = "running"
+        return status
+
+    async def _maybe_recover_orphaned_issues(self, issue_tool: Any) -> int:
+        """Check for incomplete issues and respawn workers.
+
+        Called on first execute() to recover from previous session crash.
+        Scans for issues that are "open" or "in_progress" without active
+        worker tasks and respawns workers for them.
+
+        Args:
+            issue_tool: The issue manager tool for querying issues
+
+        Returns:
+            Number of workers recovered/respawned
+        """
+        if self._recovery_done:
+            return 0
+
+        self._recovery_done = True
+        recovered = 0
+
+        try:
+            # Find issues that may need workers
+            issues_to_recover = []
+            seen_ids: set[str] = set()
+
+            # 1. "open" issues - never had a worker (or worker died before claiming)
+            try:
+                open_result = await issue_tool.execute(
+                    {
+                        "operation": "list",
+                        "params": {"status": "open"},
+                    }
+                )
+                open_issues = open_result.output.get("issues", [])
+                for issue in open_issues:
+                    issue_id = issue.get("id")
+                    if issue_id and issue_id not in seen_ids:
+                        issues_to_recover.append(issue)
+                        seen_ids.add(issue_id)
+            except Exception as e:
+                logger.warning(f"Failed to fetch open issues for recovery: {e}")
+
+            # 2. "in_progress" issues - worker may have died mid-execution
+            try:
+                in_progress_result = await issue_tool.execute(
+                    {
+                        "operation": "list",
+                        "params": {"status": "in_progress"},
+                    }
+                )
+                in_progress_issues = in_progress_result.output.get("issues", [])
+                for issue in in_progress_issues:
+                    issue_id = issue.get("id")
+                    if issue_id and issue_id not in seen_ids:
+                        # Only recover if we don't already have a task running
+                        if issue_id not in self._worker_tasks:
+                            issues_to_recover.append(issue)
+                            seen_ids.add(issue_id)
+            except Exception as e:
+                logger.warning(f"Failed to fetch in_progress issues for recovery: {e}")
+
+            # Respawn workers for orphaned issues
+            if issues_to_recover:
+                logger.info(f"Recovering {len(issues_to_recover)} orphaned issue(s)")
+                for issue in issues_to_recover:
+                    issue_id = issue.get("id")
+                    # Clear from _spawned_issues to allow respawn
+                    self._spawned_issues.discard(issue_id)
+                    # Respawn worker
+                    await self._maybe_spawn_worker({"issue": issue}, issue_tool)
+                    recovered += 1
+
+            self._recovered_count = recovered
+            return recovered
+
+        except Exception as e:
+            logger.error(f"Recovery failed: {e}", exc_info=True)
+            return 0
 
     async def execute(
         self,
@@ -175,8 +330,14 @@ class ForemanOrchestrator:
 
         provider = providers[provider_name]
 
-        # Check for worker updates before processing
+        # Get issue tool (needed for recovery and progress)
         issue_tool = tools.get("issue") or tools.get("tool-issue") or tools.get("issue_manager")
+
+        # Recovery: Check for orphaned issues on first execute
+        if issue_tool and not self._recovery_done:
+            await self._maybe_recover_orphaned_issues(issue_tool)
+
+        # Check for worker updates before processing
         progress_report = ""
         if issue_tool:
             progress_report = await self._check_worker_progress(issue_tool)
@@ -416,8 +577,19 @@ class ForemanOrchestrator:
         issue = issue_result.get("issue", {})
         issue_id = issue.get("id")
 
-        if not issue_id or issue_id in self._spawned_issues:
+        if not issue_id:
             return
+
+        # Check if already spawned AND still running (allow respawn if task died)
+        if issue_id in self._spawned_issues:
+            task = self._worker_tasks.get(issue_id)
+            if task and not task.done():
+                logger.debug(f"Worker already running for issue {issue_id}, skipping")
+                return
+            # Task finished or doesn't exist - allow respawn (recovery case)
+            logger.debug(
+                f"Allowing respawn for issue {issue_id} (previous task finished or missing)"
+            )
 
         self._spawned_issues.add(issue_id)
 
@@ -450,15 +622,13 @@ class ForemanOrchestrator:
         # Build worker prompt
         worker_prompt = self._build_worker_prompt(issue)
 
-        # Spawn worker in background using direct bundle loading
+        # Spawn worker as tracked asyncio task
         try:
-            logger.info(f"Spawning worker for issue {issue_id} via direct bundle loading")
-
-            # Fire-and-forget spawn - worker runs asynchronously
-            asyncio.create_task(
-                self._run_spawn_and_handle_result(worker_bundle, worker_prompt, issue_id)
+            logger.info(f"Spawning tracked worker for issue {issue_id}")
+            self._spawn_worker_task(
+                issue_id,
+                self._run_spawn_and_handle_result(worker_bundle, worker_prompt, issue_id),
             )
-
             logger.info(f"Successfully initiated worker spawn for issue {issue_id}")
         except Exception as e:
             error = f"Failed to spawn worker: {e}"
@@ -719,6 +889,17 @@ When done, update the issue with your results:
     async def _check_worker_progress(self, issue_tool: Any) -> str:
         """Check for completed or blocked issues from workers."""
         parts = []
+
+        # Report recovery if it happened
+        if self._recovered_count > 0:
+            parts.append(f"🔄 Recovered {self._recovered_count} worker(s) from previous session")
+            self._recovered_count = 0  # Clear after reporting
+
+        # Report active worker tasks
+        task_status = self.get_worker_status()
+        running_count = sum(1 for s in task_status.values() if s == "running")
+        if running_count:
+            parts.append(f"🔧 {running_count} worker task(s) currently running")
 
         try:
             # Check completed issues

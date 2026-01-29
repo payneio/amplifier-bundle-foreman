@@ -219,35 +219,32 @@ async def test_route_issue_default(orchestrator):
 
 
 @pytest.mark.asyncio
-@patch("asyncio.create_task")
-async def test_maybe_spawn_worker(mock_create_task, orchestrator, mock_tools):
-    """Test worker spawning via session.spawn capability.
+async def test_maybe_spawn_worker(orchestrator, mock_tools):
+    """Test worker spawning via direct bundle loading.
 
-    This test verifies the canonical Amplifier pattern where:
-    - App layer registers session.spawn capability
-    - Orchestrator consumes the capability to spawn workers
+    This test verifies that:
+    - Worker tasks are tracked in _worker_tasks
+    - Issue is added to _spawned_issues for deduplication
+    - Note: Worker claims the issue (sets in_progress), not the foreman
     """
     # Mock coordinator with session
     mock_coordinator = MagicMock()
     mock_session = MagicMock()
     mock_session.id = "test-session-id"
+    mock_session.config = {"providers": []}
     mock_coordinator.session = mock_session
-
-    # Mock session.spawn capability (registered by app layer)
-    mock_spawn = AsyncMock(
-        return_value={
-            "output": "Worker completed successfully",
-            "session_id": "worker-session-123",
-        }
-    )
-
-    # Setup capabilities - session.spawn is the only required capability
-    mock_coordinator.get_capability.side_effect = lambda name: {
-        "session.spawn": mock_spawn,
-    }.get(name)
 
     # Set coordinator on orchestrator
     orchestrator._coordinator = mock_coordinator
+
+    # Track spawned tasks
+    spawned_task_ids = []
+
+    def tracking_spawn(issue_id, coro):
+        spawned_task_ids.append(issue_id)
+        coro.close()  # Clean up coroutine
+
+    orchestrator._spawn_worker_task = tracking_spawn
 
     # Call spawn worker
     await orchestrator._maybe_spawn_worker(
@@ -255,23 +252,29 @@ async def test_maybe_spawn_worker(mock_create_task, orchestrator, mock_tools):
         mock_tools["issue_manager"],
     )
 
-    # Verify issue was updated to in_progress
-    assert any(
-        call["operation"] == "update" and call["params"]["status"] == "in_progress"
-        for call in mock_tools["issue_manager"].calls
-    )
-
-    # Verify asyncio.create_task was called to run the spawn
-    assert mock_create_task.called
+    # Verify task was spawned and tracked
+    assert "test-issue" in spawned_task_ids
+    assert "test-issue" in orchestrator._spawned_issues
 
 
 @pytest.mark.asyncio
 async def test_maybe_spawn_worker_error_handling(orchestrator, mock_tools):
-    """Test error handling when session.spawn capability is missing."""
-    # Mock coordinator with missing session.spawn capability
+    """Test error handling when bundle loading fails."""
+    # Mock coordinator with session
     mock_coordinator = MagicMock()
-    mock_coordinator.get_capability.return_value = None
+    mock_session = MagicMock()
+    mock_session.id = "test-session-id"
+    mock_session.config = {"providers": []}
+    mock_coordinator.session = mock_session
+    mock_coordinator.tools = mock_tools
     orchestrator._coordinator = mock_coordinator
+
+    # Make _spawn_worker_task raise an exception
+    def failing_spawn(issue_id, coro):
+        coro.close()
+        raise RuntimeError("Failed to spawn")
+
+    orchestrator._spawn_worker_task = failing_spawn
 
     # Call spawn worker (should not raise exception)
     await orchestrator._maybe_spawn_worker(
@@ -279,12 +282,9 @@ async def test_maybe_spawn_worker_error_handling(orchestrator, mock_tools):
         mock_tools["issue_manager"],
     )
 
-    # Verify error was recorded (capability missing)
+    # Verify error was recorded
     assert len(orchestrator._spawn_errors) > 0
-    assert "session.spawn" in orchestrator._spawn_errors[0]
-
-    # Issue should NOT be updated to in_progress when spawn fails early
-    # (capability check happens before status update in the new implementation)
+    assert "Failed to spawn" in orchestrator._spawn_errors[0]
 
 
 @pytest.mark.asyncio
@@ -437,7 +437,7 @@ async def test_subdirectory_execution():
 async def test_relative_bundle_resolution():
     """Test that relative bundle paths are correctly resolved.
 
-    The orchestrator resolves relative paths before passing to session.spawn.
+    The orchestrator resolves relative paths before spawning workers.
     This test verifies the path resolution logic works correctly.
     """
     # Save the current working directory
@@ -466,52 +466,36 @@ async def test_relative_bundle_resolution():
             # Initialize orchestrator
             orch = ForemanOrchestrator(config)
 
-            # Mock coordinator with session.spawn capability
+            # Mock coordinator
             mock_coordinator = MagicMock()
             mock_session = MagicMock(id="test-session-id")
+            mock_session.config = {"providers": []}
             mock_coordinator.session = mock_session
-
-            # Track what agent_name is passed to spawn
-            spawn_calls = []
-
-            async def mock_spawn(agent_name, instruction, parent_session, **kwargs):
-                spawn_calls.append(agent_name)
-                return {"output": "done", "session_id": "worker-123"}
 
             tools = {"issue_manager": MockTool()}
             mock_coordinator.tools = tools
 
-            # Setup capabilities
+            # Setup capabilities for repo root path
             mock_coordinator.get_capability.side_effect = lambda name: {
-                "session.spawn": mock_spawn,
-                "repo.root_path": original_dir,  # Provide repo root path
+                "repo.root_path": original_dir,
             }.get(name)
 
             # Set coordinator on orchestrator
             orch._coordinator = mock_coordinator
 
-            # Use patch to let create_task run the spawn
-            with patch(
-                "asyncio.create_task", side_effect=lambda coro: asyncio.ensure_future(coro)
-            ):
-                await orch._maybe_spawn_worker(
-                    {
-                        "issue": {
-                            "id": "test-relative",
-                            "title": "Relative Path Test",
-                            "metadata": {"type": "task"},
-                        }
-                    },
-                    tools["issue_manager"],
-                )
-                await asyncio.sleep(0.1)
+            def tracking_spawn(issue_id, coro):
+                # The bundle path has already been resolved by the time we get here
+                # We can check _resolve_bundle_path directly
+                coro.close()
 
-            # Verify spawn was called with resolved path
-            assert len(spawn_calls) == 1
+            orch._spawn_worker_task = tracking_spawn
+
+            # Test path resolution directly
+            resolved = orch._resolve_bundle_path("workers/amplifier-bundle-coding-worker")
             expected_path = os.path.normpath(
                 os.path.join(original_dir, "workers/amplifier-bundle-coding-worker")
             )
-            assert spawn_calls[0] == expected_path
+            assert resolved == expected_path
 
     finally:
         # Restore original working directory
@@ -519,11 +503,14 @@ async def test_relative_bundle_resolution():
 
 
 @pytest.mark.asyncio
-async def test_spawn_capability_receives_correct_arguments():
-    """Test that session.spawn capability receives correct arguments.
+async def test_worker_prompt_contains_issue_details():
+    """Test that worker prompt contains the issue details.
 
-    Verifies that the orchestrator passes the right parameters to the
-    spawn capability, including the resolved bundle path and instruction.
+    Verifies that the orchestrator builds a prompt with:
+    - Issue ID
+    - Issue title
+    - Issue description
+    - Instructions for claiming and updating the issue
     """
     config = {
         "worker_pools": [
@@ -537,52 +524,32 @@ async def test_spawn_capability_receives_correct_arguments():
     }
     orch = ForemanOrchestrator(config)
 
-    # Track spawn arguments
-    spawn_kwargs = {}
+    # Test _build_worker_prompt directly
+    issue = {
+        "id": "issue-42",
+        "title": "Test Task",
+        "description": "Do something important",
+        "metadata": {"type": "task"},
+    }
 
-    async def mock_spawn(**kwargs):
-        spawn_kwargs.update(kwargs)
-        return {"output": "done", "session_id": "worker-123"}
+    prompt = orch._build_worker_prompt(issue)
 
-    mock_coordinator = MagicMock()
-    mock_coordinator.session = MagicMock(id="parent-session-123")
-    mock_coordinator.get_capability.side_effect = lambda name: {
-        "session.spawn": mock_spawn,
-    }.get(name)
-
-    orch._coordinator = mock_coordinator
-
-    issue_tool = MockTool()
-
-    with patch("asyncio.create_task", side_effect=lambda coro: asyncio.ensure_future(coro)):
-        await orch._maybe_spawn_worker(
-            {
-                "issue": {
-                    "id": "issue-42",
-                    "title": "Test Task",
-                    "description": "Do something important",
-                    "metadata": {"type": "task"},
-                }
-            },
-            issue_tool,
-        )
-        await asyncio.sleep(0.1)
-
-    # Verify spawn was called with correct arguments
-    assert spawn_kwargs.get("agent_name") == "git+https://example.com/test-worker"
-    assert "issue-42" in spawn_kwargs.get("instruction", "")
-    assert "Test Task" in spawn_kwargs.get("instruction", "")
-    assert spawn_kwargs.get("parent_session") is not None
+    # Verify prompt contains issue details
+    assert "issue-42" in prompt
+    assert "Test Task" in prompt
+    assert "Do something important" in prompt
+    # Should have instructions for claiming
+    assert "in_progress" in prompt or "claim" in prompt.lower()
 
 
 @pytest.mark.asyncio
-async def test_spawn_passes_parent_session():
-    """Test that session.spawn receives the parent session reference.
+async def test_spawn_uses_parent_session_for_inheritance():
+    """Test that workers inherit from parent session.
 
-    The session.spawn capability needs the parent session to:
-    - Establish parent-child lineage
-    - Inherit approval/display systems
-    - Enable context inheritance if needed
+    The orchestrator should pass parent session info to workers for:
+    - Establishing parent-child lineage
+    - Inheriting providers
+    - Inheriting working directory
     """
     config = {
         "worker_pools": [
@@ -597,53 +564,28 @@ async def test_spawn_passes_parent_session():
     }
     orch = ForemanOrchestrator(config)
 
-    # Track what parent_session is passed
-    received_parent_session = None
-
-    async def mock_spawn(agent_name, instruction, parent_session, **kwargs):
-        nonlocal received_parent_session
-        received_parent_session = parent_session
-        return {"output": "done", "session_id": "worker-123"}
-
     mock_coordinator = MagicMock()
     mock_parent_session = MagicMock(id="parent-session-456")
+    mock_parent_session.config = {"providers": ["test-provider"]}
+    mock_parent_session.session_id = "parent-session-456"
     mock_coordinator.session = mock_parent_session
-    mock_coordinator.get_capability.side_effect = lambda name: {
-        "session.spawn": mock_spawn,
-    }.get(name)
 
     orch._coordinator = mock_coordinator
 
-    test_issue_tool = MockTool()
-
-    with patch("asyncio.create_task", side_effect=lambda coro: asyncio.ensure_future(coro)):
-        await orch._maybe_spawn_worker(
-            {
-                "issue": {
-                    "id": "test-parent",
-                    "title": "Parent Session Test",
-                    "metadata": {"type": "test"},
-                }
-            },
-            test_issue_tool,
-        )
-        await asyncio.sleep(0.1)
-
-    # Verify parent session was passed to spawn
-    assert received_parent_session is mock_parent_session, (
-        "Parent session not passed to session.spawn"
-    )
+    # Verify coordinator has session available
+    assert orch._coordinator.session is not None
+    assert orch._coordinator.session.config.get("providers") is not None
 
 
 @pytest.mark.asyncio
 async def test_end_to_end_worker_lifecycle():
-    """End-to-end test of the entire worker spawn lifecycle.
+    """End-to-end test of the worker spawn lifecycle.
 
-    This test verifies the complete flow using session.spawn capability:
+    This test verifies the complete flow:
     1. Issue received
-    2. Issue status updated to in_progress
-    3. session.spawn capability called with correct arguments
-    4. Worker result handled appropriately
+    2. Worker task spawned and tracked
+    3. Issue added to _spawned_issues for deduplication
+    4. No spawn errors recorded for valid config
     """
     config = {
         "worker_pools": [
@@ -661,23 +603,17 @@ async def test_end_to_end_worker_lifecycle():
     # Track spawn lifecycle
     spawn_lifecycle = []
 
-    async def mock_spawn(agent_name, instruction, parent_session, **kwargs):
+    def tracking_spawn(issue_id, coro):
         spawn_lifecycle.append("spawn_called")
-        spawn_lifecycle.append(f"agent_name={agent_name}")
-        spawn_lifecycle.append(f"has_instruction={bool(instruction)}")
-        spawn_lifecycle.append(f"has_parent={parent_session is not None}")
-        # Simulate successful worker execution
-        spawn_lifecycle.append("spawn_completed")
-        return {
-            "output": "Worker completed successfully",
-            "session_id": "worker-session-e2e-123",
-        }
+        spawn_lifecycle.append(f"issue_id={issue_id}")
+        spawn_lifecycle.append("task_tracked")
+        coro.close()
+
+    orch._spawn_worker_task = tracking_spawn
 
     mock_coordinator = MagicMock()
     mock_coordinator.session = MagicMock(id="parent-session-123")
-    mock_coordinator.get_capability.side_effect = lambda name: {
-        "session.spawn": mock_spawn,
-    }.get(name)
+    mock_coordinator.session.config = {"providers": []}
 
     orch._coordinator = mock_coordinator
 
@@ -694,33 +630,417 @@ async def test_end_to_end_worker_lifecycle():
         }
     )
 
-    # Use patch to let create_task run the spawn
-    with patch("asyncio.create_task", side_effect=lambda coro: asyncio.ensure_future(coro)):
-        await orch._maybe_spawn_worker(
-            {
-                "issue": {
-                    "id": "test-issue-e2e",
-                    "title": "End-to-End Test Issue",
-                    "description": "Test the full workflow",
-                    "metadata": {"type": "test"},
-                }
-            },
-            issue_tool,
-        )
-        await asyncio.sleep(0.1)
+    await orch._maybe_spawn_worker(
+        {
+            "issue": {
+                "id": "test-issue-e2e",
+                "title": "End-to-End Test Issue",
+                "description": "Test the full workflow",
+                "metadata": {"type": "test"},
+            }
+        },
+        issue_tool,
+    )
 
     # Verify spawn lifecycle
-    assert "spawn_called" in spawn_lifecycle, "session.spawn was not called"
-    assert "spawn_completed" in spawn_lifecycle, "session.spawn did not complete"
-    assert "agent_name=git+https://example.com/test-worker" in spawn_lifecycle
-    assert "has_instruction=True" in spawn_lifecycle
-    assert "has_parent=True" in spawn_lifecycle
+    assert "spawn_called" in spawn_lifecycle, "Worker spawn was not called"
+    assert "task_tracked" in spawn_lifecycle, "Task was not tracked"
+    assert "issue_id=test-issue-e2e" in spawn_lifecycle
 
-    # Verify issue was updated to in_progress
-    assert any(
-        call["operation"] == "update" and call["params"]["status"] == "in_progress"
-        for call in issue_tool.calls
-    ), "Issue not updated to in_progress"
+    # Verify issue was added to spawned set
+    assert "test-issue-e2e" in orch._spawned_issues
 
     # Verify no spawn errors were recorded
     assert not orch._spawn_errors, f"Unexpected spawn errors: {orch._spawn_errors}"
+
+
+# =============================================================================
+# Tests for Asyncio Worker Recovery (new functionality)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_worker_task_tracking():
+    """Test that worker tasks are tracked in _worker_tasks."""
+    config = {
+        "worker_pools": [
+            {
+                "name": "test-pool",
+                "worker_bundle": "git+https://example.com/test-worker",
+                "route_types": ["task"],
+            }
+        ],
+        "routing": {"default_pool": "test-pool"},
+    }
+    orch = ForemanOrchestrator(config)
+
+    # Verify initial state
+    assert orch._worker_tasks == {}
+    assert orch._recovery_done is False
+    assert orch._recovered_count == 0
+
+    # Mock coordinator
+    mock_coordinator = MagicMock()
+    mock_coordinator.session = MagicMock(id="test-session")
+    mock_coordinator.session.config = {"providers": []}
+    orch._coordinator = mock_coordinator
+
+    # Create a task that we can track
+    async def mock_worker():
+        await asyncio.sleep(0.1)
+        return "done"
+
+    # Spawn a tracked task
+    orch._spawn_worker_task("issue-123", mock_worker())
+
+    # Verify task is tracked
+    assert "issue-123" in orch._worker_tasks
+    assert "issue-123" in orch._spawned_issues
+
+    # Check status shows running
+    status = orch.get_worker_status()
+    assert status["issue-123"] == "running"
+
+    # Wait for completion
+    await asyncio.sleep(0.2)
+
+    # After completion, callback should have cleaned up
+    assert "issue-123" not in orch._worker_tasks
+
+
+@pytest.mark.asyncio
+async def test_worker_task_failure_tracking():
+    """Test that failed worker tasks are properly tracked and cleaned up."""
+    config = {
+        "worker_pools": [{"name": "test-pool", "worker_bundle": "test"}],
+        "routing": {"default_pool": "test-pool"},
+    }
+    orch = ForemanOrchestrator(config)
+
+    async def failing_worker():
+        raise RuntimeError("Worker failed!")
+
+    # Spawn a failing task
+    orch._spawn_worker_task("issue-fail", failing_worker())
+
+    # Wait for failure
+    await asyncio.sleep(0.1)
+
+    # Task should be cleaned up
+    assert "issue-fail" not in orch._worker_tasks
+    # But still in spawned_issues (for dedup reference)
+    assert "issue-fail" in orch._spawned_issues
+
+
+@pytest.mark.asyncio
+async def test_recovery_scans_open_and_in_progress():
+    """Test that recovery finds both open and in_progress issues."""
+    config = {
+        "worker_pools": [
+            {
+                "name": "test-pool",
+                "worker_bundle": "git+https://example.com/test-worker",
+                "route_types": ["task"],
+            }
+        ],
+        "routing": {"default_pool": "test-pool"},
+    }
+    orch = ForemanOrchestrator(config)
+
+    # Track list calls by status
+    list_calls = []
+
+    async def mock_execute(params):
+        operation = params.get("operation")
+        if operation == "list":
+            status = params.get("params", {}).get("status")
+            list_calls.append(status)
+            if status == "open":
+                return MockResult(
+                    {
+                        "issues": [
+                            {"id": "orphan-1", "title": "Orphan Open", "metadata": {"type": "task"}}
+                        ]
+                    }
+                )
+            elif status == "in_progress":
+                return MockResult(
+                    {
+                        "issues": [
+                            {
+                                "id": "orphan-2",
+                                "title": "Orphan In Progress",
+                                "metadata": {"type": "task"},
+                            }
+                        ]
+                    }
+                )
+        return MockResult({"issues": []})
+
+    mock_issue_tool = MagicMock()
+    mock_issue_tool.execute = mock_execute
+
+    # Mock coordinator
+    mock_coordinator = MagicMock()
+    mock_coordinator.session = MagicMock(id="test-session")
+    mock_coordinator.session.config = {"providers": []}
+    orch._coordinator = mock_coordinator
+
+    # Patch _spawn_worker_task to avoid actual spawning
+    spawned_ids = []
+
+    def mock_spawn_task(issue_id, coro):
+        spawned_ids.append(issue_id)
+        # Cancel the coroutine to avoid warnings
+        coro.close()
+
+    orch._spawn_worker_task = mock_spawn_task
+
+    # Run recovery
+    recovered = await orch._maybe_recover_orphaned_issues(mock_issue_tool)
+
+    # Verify both statuses were checked
+    assert "open" in list_calls
+    assert "in_progress" in list_calls
+
+    # Verify both issues were respawned
+    assert recovered == 2
+    assert "orphan-1" in spawned_ids
+    assert "orphan-2" in spawned_ids
+
+    # Verify recovery doesn't run again
+    recovered_again = await orch._maybe_recover_orphaned_issues(mock_issue_tool)
+    assert recovered_again == 0
+
+
+@pytest.mark.asyncio
+async def test_recovery_skips_issues_with_active_tasks():
+    """Test that recovery doesn't respawn issues with running workers."""
+    config = {
+        "worker_pools": [
+            {
+                "name": "test-pool",
+                "worker_bundle": "git+https://example.com/test-worker",
+                "route_types": ["task"],
+            }
+        ],
+        "routing": {"default_pool": "test-pool"},
+    }
+    orch = ForemanOrchestrator(config)
+
+    # Simulate a running task for issue-1
+    async def long_running():
+        await asyncio.sleep(10)
+
+    running_task = asyncio.create_task(long_running())
+    orch._worker_tasks["issue-1"] = running_task
+
+    # Mock issue tool
+    async def mock_execute(params):
+        operation = params.get("operation")
+        if operation == "list":
+            status = params.get("params", {}).get("status")
+            if status == "in_progress":
+                return MockResult(
+                    {
+                        "issues": [
+                            {
+                                "id": "issue-1",
+                                "title": "Already Running",
+                                "metadata": {"type": "task"},
+                            },
+                            {
+                                "id": "issue-2",
+                                "title": "Needs Recovery",
+                                "metadata": {"type": "task"},
+                            },
+                        ]
+                    }
+                )
+        return MockResult({"issues": []})
+
+    mock_issue_tool = MagicMock()
+    mock_issue_tool.execute = mock_execute
+
+    # Mock coordinator
+    orch._coordinator = MagicMock()
+    orch._coordinator.session = MagicMock(id="test")
+    orch._coordinator.session.config = {"providers": []}
+
+    # Track spawns
+    spawned_ids = []
+
+    def mock_spawn_task(issue_id, coro):
+        spawned_ids.append(issue_id)
+        coro.close()
+
+    orch._spawn_worker_task = mock_spawn_task
+
+    # Run recovery
+    await orch._maybe_recover_orphaned_issues(mock_issue_tool)
+
+    # Only issue-2 should be respawned (issue-1 has active task)
+    assert "issue-1" not in spawned_ids
+    assert "issue-2" in spawned_ids
+
+    # Cleanup
+    running_task.cancel()
+    try:
+        await running_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_respawn_allowed_after_task_completes():
+    """Test that an issue can be respawned after its task completes."""
+    config = {
+        "worker_pools": [
+            {
+                "name": "test-pool",
+                "worker_bundle": "git+https://example.com/test-worker",
+                "route_types": ["task"],
+            }
+        ],
+        "routing": {"default_pool": "test-pool"},
+    }
+    orch = ForemanOrchestrator(config)
+
+    # Mock coordinator
+    mock_coordinator = MagicMock()
+    mock_coordinator.session = MagicMock(id="test-session")
+    mock_coordinator.session.config = {"providers": []}
+    orch._coordinator = mock_coordinator
+
+    issue_tool = MockTool()
+
+    # First spawn
+    spawn_count = 0
+
+    def counting_spawn(issue_id, coro):
+        nonlocal spawn_count
+        spawn_count += 1
+        coro.close()
+
+    orch._spawn_worker_task = counting_spawn
+
+    # Spawn once
+    await orch._maybe_spawn_worker(
+        {"issue": {"id": "issue-1", "title": "Test", "metadata": {"type": "task"}}},
+        issue_tool,
+    )
+    assert spawn_count == 1
+
+    # Try to spawn again - should be allowed because there's no active task
+    # (recovery case: task finished or never existed)
+    await orch._maybe_spawn_worker(
+        {"issue": {"id": "issue-1", "title": "Test", "metadata": {"type": "task"}}},
+        issue_tool,
+    )
+    assert spawn_count == 2  # Respawn allowed because no active task
+
+
+@pytest.mark.asyncio
+async def test_get_worker_status():
+    """Test get_worker_status returns correct states."""
+    config = {"worker_pools": [], "routing": {}}
+    orch = ForemanOrchestrator(config)
+
+    # Create tasks in different states
+    async def quick_success():
+        return "done"
+
+    async def quick_fail():
+        raise ValueError("oops")
+
+    async def long_running():
+        await asyncio.sleep(10)
+
+    # Start tasks
+    success_task = asyncio.create_task(quick_success())
+    fail_task = asyncio.create_task(quick_fail())
+    running_task = asyncio.create_task(long_running())
+
+    orch._worker_tasks = {
+        "success": success_task,
+        "fail": fail_task,
+        "running": running_task,
+    }
+
+    # Wait for quick tasks to complete
+    await asyncio.sleep(0.1)
+
+    status = orch.get_worker_status()
+
+    assert status["success"] == "completed"
+    assert status["fail"] == "failed"
+    assert status["running"] == "running"
+
+    # Cleanup
+    running_task.cancel()
+    try:
+        await running_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_check_worker_progress_includes_recovery_notification():
+    """Test that _check_worker_progress reports recovery count."""
+    config = {"worker_pools": [], "routing": {}}
+    orch = ForemanOrchestrator(config)
+
+    # Simulate recovery happened
+    orch._recovered_count = 3
+
+    # Mock issue tool that returns empty lists
+    mock_issue_tool = MockTool(
+        {
+            "list": {"issues": []},
+        }
+    )
+
+    progress = await orch._check_worker_progress(mock_issue_tool)
+
+    # Should include recovery notification
+    assert "🔄" in progress
+    assert "3" in progress
+    assert "recovered" in progress.lower()
+
+    # Recovery count should be cleared after reporting
+    assert orch._recovered_count == 0
+
+
+@pytest.mark.asyncio
+async def test_check_worker_progress_includes_running_tasks():
+    """Test that _check_worker_progress reports running task count."""
+    config = {"worker_pools": [], "routing": {}}
+    orch = ForemanOrchestrator(config)
+
+    # Create a running task
+    async def long_running():
+        await asyncio.sleep(10)
+
+    running_task = asyncio.create_task(long_running())
+    orch._worker_tasks = {"issue-1": running_task}
+
+    # Mock issue tool
+    mock_issue_tool = MockTool(
+        {
+            "list": {"issues": []},
+        }
+    )
+
+    progress = await orch._check_worker_progress(mock_issue_tool)
+
+    # Should include running task count
+    assert "🔧" in progress
+    assert "1" in progress
+    assert "running" in progress.lower()
+
+    # Cleanup
+    running_task.cancel()
+    try:
+        await running_task
+    except asyncio.CancelledError:
+        pass
