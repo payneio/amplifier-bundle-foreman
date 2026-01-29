@@ -786,16 +786,6 @@ async def test_recovery_scans_open_and_in_progress():
     mock_coordinator.session.config = {"providers": []}
     orch._coordinator = mock_coordinator
 
-    # Patch _spawn_worker_task to avoid actual spawning
-    spawned_ids = []
-
-    def mock_spawn_task(issue_id, coro):
-        spawned_ids.append(issue_id)
-        # Cancel the coroutine to avoid warnings
-        coro.close()
-
-    orch._spawn_worker_task = mock_spawn_task
-
     # Run recovery
     recovered = await orch._maybe_recover_orphaned_issues(mock_issue_tool)
 
@@ -803,10 +793,13 @@ async def test_recovery_scans_open_and_in_progress():
     assert "open" in list_calls
     assert "in_progress" in list_calls
 
-    # Verify both issues were respawned
+    # Verify both issues were detected (but NOT spawned - auto-spawn was removed
+    # because it blocked the event loop due to bundle loading I/O)
     assert recovered == 2
-    assert "orphan-1" in spawned_ids
-    assert "orphan-2" in spawned_ids
+    assert len(orch._orphaned_issues) == 2
+    orphaned_ids = [i.get("id") for i in orch._orphaned_issues]
+    assert "orphan-1" in orphaned_ids
+    assert "orphan-2" in orphaned_ids
 
     # Verify recovery doesn't run again
     recovered_again = await orch._maybe_recover_orphaned_issues(mock_issue_tool)
@@ -867,21 +860,14 @@ async def test_recovery_skips_issues_with_active_tasks():
     orch._coordinator.session = MagicMock(id="test")
     orch._coordinator.session.config = {"providers": []}
 
-    # Track spawns
-    spawned_ids = []
-
-    def mock_spawn_task(issue_id, coro):
-        spawned_ids.append(issue_id)
-        coro.close()
-
-    orch._spawn_worker_task = mock_spawn_task
-
     # Run recovery
     await orch._maybe_recover_orphaned_issues(mock_issue_tool)
 
-    # Only issue-2 should be respawned (issue-1 has active task)
-    assert "issue-1" not in spawned_ids
-    assert "issue-2" in spawned_ids
+    # Only issue-2 should be in orphaned list (issue-1 has active task so it's skipped)
+    # Note: Recovery no longer spawns workers (was blocking event loop), it just detects
+    orphaned_ids = [i.get("id") for i in orch._orphaned_issues]
+    assert "issue-1" not in orphaned_ids  # Has active task, not orphaned
+    assert "issue-2" in orphaned_ids  # No active task, is orphaned
 
     # Cleanup
     running_task.cancel()
@@ -985,13 +971,17 @@ async def test_get_worker_status():
 
 
 @pytest.mark.asyncio
-async def test_check_worker_progress_includes_recovery_notification():
-    """Test that _check_worker_progress reports recovery count."""
+async def test_check_worker_progress_includes_orphaned_issues():
+    """Test that _check_worker_progress reports orphaned issues from recovery."""
     config = {"worker_pools": [], "routing": {}}
     orch = ForemanOrchestrator(config)
 
-    # Simulate recovery happened
-    orch._recovered_count = 3
+    # Simulate orphaned issues found during recovery
+    orch._orphaned_issues = [
+        {"id": "issue-1", "title": "Orphan 1"},
+        {"id": "issue-2", "title": "Orphan 2"},
+        {"id": "issue-3", "title": "Orphan 3"},
+    ]
 
     # Mock issue tool that returns empty lists
     mock_issue_tool = MockTool(
@@ -1002,13 +992,13 @@ async def test_check_worker_progress_includes_recovery_notification():
 
     progress = await orch._check_worker_progress(mock_issue_tool)
 
-    # Should include recovery notification
-    assert "🔄" in progress
+    # Should include orphaned issues notification
+    assert "⚠️" in progress
     assert "3" in progress
-    assert "recovered" in progress.lower()
+    assert "orphaned" in progress.lower()
 
-    # Recovery count should be cleared after reporting
-    assert orch._recovered_count == 0
+    # Orphaned issues should be cleared after reporting
+    assert orch._orphaned_issues == []
 
 
 @pytest.mark.asyncio

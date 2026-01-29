@@ -105,6 +105,9 @@ class ForemanOrchestrator:
         # Count of recovered workers (for user notification)
         self._recovered_count: int = 0
 
+        # Orphaned issues found during recovery (for reporting)
+        self._orphaned_issues: list[dict] = []
+
         # Validate configuration
         self._validate_config()
 
@@ -271,16 +274,17 @@ class ForemanOrchestrator:
             except Exception as e:
                 logger.warning(f"Failed to fetch in_progress issues for recovery: {e}")
 
-            # Respawn workers for orphaned issues
+            # Report orphaned issues (but don't auto-spawn - that blocks the event loop)
+            # Auto-spawning workers during recovery causes the event loop to block
+            # because bundle loading does heavy I/O (git clone, module activation).
+            # Instead, we just detect and report - user can re-create issues if needed.
             if issues_to_recover:
-                logger.info(f"Recovering {len(issues_to_recover)} orphaned issue(s)")
-                for issue in issues_to_recover:
-                    issue_id = issue.get("id")
-                    # Clear from _spawned_issues to allow respawn
-                    self._spawned_issues.discard(issue_id)
-                    # Respawn worker
-                    await self._maybe_spawn_worker({"issue": issue}, issue_tool)
-                    recovered += 1
+                logger.info(
+                    f"Found {len(issues_to_recover)} orphaned issue(s) from previous session"
+                )
+                # Store for reporting in progress check
+                self._orphaned_issues = issues_to_recover
+                recovered = len(issues_to_recover)
 
             self._recovered_count = recovered
             return recovered
@@ -890,10 +894,17 @@ When done, update the issue with your results:
         """Check for completed or blocked issues from workers."""
         parts = []
 
-        # Report recovery if it happened
-        if self._recovered_count > 0:
-            parts.append(f"🔄 Recovered {self._recovered_count} worker(s) from previous session")
-            self._recovered_count = 0  # Clear after reporting
+        # Report orphaned issues found during recovery
+        if self._orphaned_issues:
+            parts.append(
+                f"⚠️ Found {len(self._orphaned_issues)} orphaned issue(s) from previous session:"
+            )
+            for issue in self._orphaned_issues[:5]:  # Show first 5
+                parts.append(f"  - #{issue.get('id', '?')[:8]}: {issue.get('title', 'Untitled')}")
+            if len(self._orphaned_issues) > 5:
+                parts.append(f"  ... and {len(self._orphaned_issues) - 5} more")
+            parts.append("  (Use 'list issues' to see all, or create new issues to restart work)")
+            self._orphaned_issues = []  # Clear after reporting
 
         # Report active worker tasks
         task_status = self.get_worker_status()
