@@ -273,7 +273,7 @@ class ForemanOrchestrator:
             break
 
         # Store conversation in context
-        await self._update_context(context, prompt, final_response)
+        await self._update_context(context, final_response)
 
         # Emit orchestrator complete event - CRITICAL for session state management
         await hooks.emit(
@@ -304,15 +304,14 @@ class ForemanOrchestrator:
         messages.append({"role": "system", "content": system_content})
 
         # Add conversation history from context (get_messages is async)
+        # Note: The current user prompt was already added to context in execute()
+        # so it will be included in this history
         history = []
         if hasattr(context, "get_messages"):
             history = await context.get_messages()
         for msg in history[-10:]:  # Last 10 messages for context
             if msg.get("role") in ("user", "assistant"):
                 messages.append({"role": msg["role"], "content": msg.get("content", "")})
-
-        # Add current prompt
-        messages.append({"role": "user", "content": prompt})
 
         return messages
 
@@ -724,11 +723,14 @@ If you are blocked, update the issue with status "blocked" and explain what's bl
 
         return "\n".join(parts)
 
-    async def _update_context(self, context: Any, prompt: str, response: str) -> None:
-        """Store the conversation turn in context."""
+    async def _update_context(self, context: Any, response: str) -> None:
+        """Store the assistant response in context.
+
+        Note: User message is already added at the start of execute(),
+        so we only need to add the assistant response here.
+        """
         try:
             if hasattr(context, "add_message"):
-                await context.add_message({"role": "user", "content": prompt})
                 await context.add_message({"role": "assistant", "content": response})
         except Exception as e:
             logger.error(f"Failed to update context: {e}")
