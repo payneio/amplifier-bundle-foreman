@@ -7,6 +7,7 @@ bundle:
 # NO foundation include - this is a standalone bundle with minimal tools
 # Workers inherit from foundation when spawned
 includes:
+  - bundle: git_https://github.com/microsoft/amplifier-foundation@main@subdirectory=bundles/minimal.yaml
   - bundle: git+https://github.com/microsoft/amplifier-bundle-issues@main#subdirectory=behaviors/issues.yaml
 
 session:
