@@ -14,10 +14,12 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "amplifier-core>=0.1.0",
+    "amplifier-foundation>=0.1.0",
 ]
 
 [tool.uv.sources]
 amplifier-core = { git = "https://github.com/microsoft/amplifier-core", branch = "main" }
+amplifier-foundation = { git = "https://github.com/microsoft/amplifier-foundation", branch = "main" }
 
 [project.optional-dependencies]
 dev = [

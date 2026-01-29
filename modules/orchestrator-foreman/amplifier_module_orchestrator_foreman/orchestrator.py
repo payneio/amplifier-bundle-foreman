@@ -403,15 +403,15 @@ class ForemanOrchestrator:
         return results
 
     async def _maybe_spawn_worker(self, issue_result: dict[str, Any], issue_tool: Any) -> None:
-        """Spawn a worker for a newly created issue using session.spawn capability.
+        """Spawn a worker for a newly created issue by loading bundle directly.
 
-        This method uses the canonical Amplifier pattern where:
-        - App layer registers the session.spawn capability
-        - Orchestrator consumes the capability to spawn worker sessions
-        - Foundation's PreparedBundle.spawn() handles the actual session creation
+        This method loads worker bundles directly using amplifier_foundation's
+        load_bundle() and PreparedBundle.create_session(), enabling spawning
+        of full bundles by URL without requiring CLI-level support.
 
-        Reference: amplifier_foundation/bundle.py:1111-1289 (PreparedBundle.spawn)
-        Reference: amplifier_module_tool_task/__init__.py:592-670 (task tool pattern)
+        The foreman pattern specifically needs to spawn complete external bundles
+        (not just agents defined in the parent config), so we bypass the CLI's
+        session.spawn capability and use foundation primitives directly.
         """
         issue = issue_result.get("issue", {})
         issue_id = issue.get("id")
@@ -441,18 +441,6 @@ class ForemanOrchestrator:
         worker_bundle = self._resolve_bundle_path(worker_bundle)
         logger.info(f"Resolved worker bundle path: {worker_bundle}")
 
-        # Get the session.spawn capability (registered by app layer)
-        spawn = self._coordinator.get_capability("session.spawn")
-        if not spawn:
-            error = (
-                "Required capability 'session.spawn' not registered. "
-                "The app layer must register this capability for worker spawning to work. "
-                "See foreman bundle documentation for app setup requirements."
-            )
-            logger.error(error)
-            self._append_spawn_error(issue_id, error)
-            return
-
         # Mark issue as in_progress before spawning
         try:
             await issue_tool.execute(
@@ -470,13 +458,13 @@ class ForemanOrchestrator:
         # Build worker prompt
         worker_prompt = self._build_worker_prompt(issue)
 
-        # Spawn worker in background using session.spawn capability
+        # Spawn worker in background using direct bundle loading
         try:
-            logger.info(f"Spawning worker for issue {issue_id} via session.spawn capability")
+            logger.info(f"Spawning worker for issue {issue_id} via direct bundle loading")
 
             # Fire-and-forget spawn - worker runs asynchronously
             asyncio.create_task(
-                self._run_spawn_and_handle_result(spawn, worker_bundle, worker_prompt, issue_id)
+                self._run_spawn_and_handle_result(worker_bundle, worker_prompt, issue_id)
             )
 
             logger.info(f"Successfully initiated worker spawn for issue {issue_id}")
@@ -518,38 +506,64 @@ If you are blocked, update the issue with status "blocked" and explain what's bl
 
     async def _run_spawn_and_handle_result(
         self,
-        spawn: Any,
-        worker_bundle: str,
+        worker_bundle_uri: str,
         worker_prompt: str,
         issue_id: str,
     ) -> None:
-        """Run the session.spawn capability and handle the result.
+        """Load worker bundle and execute in a new session.
 
         This method is run as an asyncio task (fire-and-forget) so that
         workers execute in the background while the foreman continues
         interacting with the user.
 
+        Uses amplifier_foundation's load_bundle() and PreparedBundle.create_session()
+        to spawn complete external bundles directly, without requiring CLI support.
+
         Args:
-            spawn: The session.spawn capability function
-            worker_bundle: Bundle path/URI for the worker
+            worker_bundle_uri: Bundle URI (git+https://..., file path, etc.)
             worker_prompt: Instruction prompt for the worker
             issue_id: Issue ID for logging and error tracking
         """
-        try:
-            # Get parent session for the spawn call
-            parent_session = getattr(self._coordinator, "session", None)
+        from amplifier_foundation import load_bundle
 
-            # Call the registered spawn capability
-            # This follows the same pattern as the task tool
-            result = await spawn(
-                agent_name=worker_bundle,
-                instruction=worker_prompt,
-                parent_session=parent_session,
-                agent_configs={},  # Workers are full bundles, not agent configs
+        try:
+            # Load the worker bundle from URI
+            logger.info(f"Loading worker bundle from: {worker_bundle_uri}")
+            bundle = await load_bundle(worker_bundle_uri)
+            logger.info(f"Loaded bundle '{bundle.name}' for issue {issue_id}")
+
+            # Prepare the bundle (activates modules, creates resolver)
+            prepared = await bundle.prepare()
+            logger.info(f"Prepared bundle '{bundle.name}' for issue {issue_id}")
+
+            # Get parent session info for lineage tracking
+            parent_session = getattr(self._coordinator, "session", None)
+            parent_id = parent_session.session_id if parent_session else None
+
+            # Inherit UX systems from parent for consistent display/approval
+            approval_system = None
+            display_system = None
+            if parent_session and hasattr(parent_session, "coordinator"):
+                approval_system = getattr(parent_session.coordinator, "approval_system", None)
+                display_system = getattr(parent_session.coordinator, "display_system", None)
+
+            # Create worker session
+            worker_session = await prepared.create_session(
+                parent_id=parent_id,
+                approval_system=approval_system,
+                display_system=display_system,
             )
 
-            session_id = result.get("session_id", "unknown")
-            logger.info(f"Worker completed for issue {issue_id}, session: {session_id}")
+            try:
+                # Execute the worker instruction
+                logger.info(f"Executing worker for issue {issue_id}")
+                await worker_session.execute(worker_prompt)
+                logger.info(
+                    f"Worker completed for issue {issue_id}, session: {worker_session.session_id}"
+                )
+            finally:
+                # Always cleanup the worker session
+                await worker_session.cleanup()
 
         except Exception as e:
             error = f"Worker execution failed for issue {issue_id}: {e}"
