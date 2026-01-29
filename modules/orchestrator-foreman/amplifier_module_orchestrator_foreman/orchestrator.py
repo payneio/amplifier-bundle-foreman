@@ -532,13 +532,21 @@ If you are blocked, update the issue with status "blocked" and explain what's bl
             bundle = await load_bundle(worker_bundle_uri)
             logger.info(f"Loaded bundle '{bundle.name}' for issue {issue_id}")
 
+            # Get parent session for config inheritance
+            parent_session = getattr(self._coordinator, "session", None)
+            parent_id = parent_session.session_id if parent_session else None
+
+            # Inherit providers from parent session
+            # Worker bundles typically don't define providers - they inherit from foreman
+            if parent_session and parent_session.config.get("providers"):
+                parent_providers = parent_session.config["providers"]
+                if not bundle.providers:
+                    bundle.providers = list(parent_providers)
+                    logger.info(f"Inherited {len(parent_providers)} providers from parent session")
+
             # Prepare the bundle (activates modules, creates resolver)
             prepared = await bundle.prepare()
             logger.info(f"Prepared bundle '{bundle.name}' for issue {issue_id}")
-
-            # Get parent session info for lineage tracking
-            parent_session = getattr(self._coordinator, "session", None)
-            parent_id = parent_session.session_id if parent_session else None
 
             # Inherit UX systems from parent for consistent display/approval
             approval_system = None
