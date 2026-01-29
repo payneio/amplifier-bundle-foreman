@@ -152,6 +152,9 @@ class ForemanOrchestrator:
         """
         self._coordinator = coordinator
 
+        # Add the user message to context at the start of execution
+        # This ensures proper conversation state management
+        await context.add_message({"role": "user", "content": prompt})
         # Get primary provider
         provider_name = next(iter(providers.keys()), None)
         if not provider_name:
