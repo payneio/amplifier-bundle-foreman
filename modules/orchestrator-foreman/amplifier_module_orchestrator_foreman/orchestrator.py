@@ -729,28 +729,33 @@ When done, update the issue with your results:
             # Inherit UX systems from parent for consistent display/approval
             approval_system = None
             display_system = None
+            parent_working_dir = None
             if parent_session and hasattr(parent_session, "coordinator"):
                 approval_system = getattr(parent_session.coordinator, "approval_system", None)
                 display_system = getattr(parent_session.coordinator, "display_system", None)
+                # Get working directory from parent - critical for file operations
+                parent_working_dir = parent_session.coordinator.get_capability(
+                    "session.working_dir"
+                )
 
-            # Create worker session
+            # Create worker session with inherited working directory
+            # IMPORTANT: session_cwd must be passed at creation time, not after
+            # The session's project directory is determined at creation based on this
+            from pathlib import Path
+
             worker_session = await prepared.create_session(
                 parent_id=parent_id,
                 approval_system=approval_system,
                 display_system=display_system,
+                session_cwd=Path(parent_working_dir) if parent_working_dir else None,
             )
 
-            # Inherit working directory from parent so tools use same paths
-            # Critical for issue_manager which uses relative path .amplifier/issues
-            if parent_session:
-                parent_working_dir = parent_session.coordinator.get_capability(
-                    "session.working_dir"
+            # Also register the capability so tools can access it
+            if parent_working_dir:
+                worker_session.coordinator.register_capability(
+                    "session.working_dir", parent_working_dir
                 )
-                if parent_working_dir:
-                    worker_session.coordinator.register_capability(
-                        "session.working_dir", parent_working_dir
-                    )
-                    logger.info(f"Inherited working_dir from parent: {parent_working_dir}")
+                logger.info(f"Worker session using working_dir: {parent_working_dir}")
 
             try:
                 # Execute the worker instruction
