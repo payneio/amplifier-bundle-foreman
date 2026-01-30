@@ -775,7 +775,7 @@ When done, update the issue with your results:
 
     def _route_issue(self, issue: dict[str, Any]) -> dict[str, Any] | None:
         """Route issue to appropriate worker pool based on metadata."""
-        issue_type = issue.get("metadata", {}).get("type", "general")
+        issue_type = issue.get("issue_type") or issue.get("metadata", {}).get("type", "general")
 
         # Check routing rules
         rules = self.routing_config.get("rules", [])
