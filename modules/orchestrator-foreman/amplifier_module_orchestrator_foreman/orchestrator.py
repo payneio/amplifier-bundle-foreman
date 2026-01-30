@@ -108,6 +108,9 @@ class ForemanOrchestrator:
         # Orphaned issues found during recovery (for reporting)
         self._orphaned_issues: list[dict] = []
 
+        # Store hooks reference for diagnostic events in async tasks
+        self._hooks: Any = None
+
         # Validate configuration
         self._validate_config()
 
@@ -161,6 +164,15 @@ class ForemanOrchestrator:
         task.add_done_callback(lambda t: self._on_worker_complete(issue_id, t))
 
         logger.debug(f"Spawned and tracking worker task for issue {issue_id}")
+
+        # Emit diagnostic event for task creation (shows in events.jsonl)
+        if self._hooks:
+            asyncio.create_task(
+                self._hooks.emit(
+                    "foreman:worker:task_created",
+                    {"issue_id": issue_id, "task_id": id(task)},
+                )
+            )
 
     def _on_worker_complete(self, issue_id: str, task: asyncio.Task) -> None:
         """Called when a worker task completes (success or failure).
@@ -311,6 +323,7 @@ class ForemanOrchestrator:
         3. Reports progress from background workers
         """
         self._coordinator = coordinator
+        self._hooks = hooks  # Store for diagnostic events in async tasks
 
         # Emit prompt submit event (CRITICAL for session state management)
         prompt_submit_result = await hooks.emit(PROMPT_SUBMIT, {"prompt": prompt})
@@ -682,6 +695,17 @@ When done, update the issue with your results:
 - Be specific in your status updates so the foreman can report progress
 """
 
+    async def _emit_diagnostic(self, event: str, data: dict[str, Any]) -> None:
+        """Emit a diagnostic event if hooks are available.
+
+        These events show up in events.jsonl to help trace worker task execution.
+        """
+        if self._hooks:
+            try:
+                await self._hooks.emit(event, data)
+            except Exception as e:
+                logger.warning(f"Failed to emit diagnostic event {event}: {e}")
+
     async def _run_spawn_and_handle_result(
         self,
         worker_bundle_uri: str,
@@ -702,13 +726,31 @@ When done, update the issue with your results:
             worker_prompt: Instruction prompt for the worker
             issue_id: Issue ID for logging and error tracking
         """
+        # Diagnostic: Task started executing
+        await self._emit_diagnostic(
+            "foreman:worker:task_started",
+            {"issue_id": issue_id, "bundle_uri": worker_bundle_uri},
+        )
+
         from amplifier_foundation import load_bundle
 
         try:
+            # Diagnostic: Bundle loading started
+            await self._emit_diagnostic(
+                "foreman:worker:bundle_loading",
+                {"issue_id": issue_id, "bundle_uri": worker_bundle_uri},
+            )
+
             # Load the worker bundle from URI
             logger.info(f"Loading worker bundle from: {worker_bundle_uri}")
             bundle = await load_bundle(worker_bundle_uri)
             logger.info(f"Loaded bundle '{bundle.name}' for issue {issue_id}")
+
+            # Diagnostic: Bundle loaded successfully
+            await self._emit_diagnostic(
+                "foreman:worker:bundle_loaded",
+                {"issue_id": issue_id, "bundle_name": bundle.name},
+            )
 
             # Get parent session for config inheritance
             parent_session = getattr(self._coordinator, "session", None)
@@ -725,6 +767,12 @@ When done, update the issue with your results:
             # Prepare the bundle (activates modules, creates resolver)
             prepared = await bundle.prepare()
             logger.info(f"Prepared bundle '{bundle.name}' for issue {issue_id}")
+
+            # Diagnostic: Bundle prepared
+            await self._emit_diagnostic(
+                "foreman:worker:bundle_prepared",
+                {"issue_id": issue_id, "bundle_name": bundle.name},
+            )
 
             # Inherit UX systems from parent for consistent display/approval
             approval_system = None
@@ -750,6 +798,16 @@ When done, update the issue with your results:
                 session_cwd=Path(parent_working_dir) if parent_working_dir else None,
             )
 
+            # Diagnostic: Session created
+            await self._emit_diagnostic(
+                "foreman:worker:session_created",
+                {
+                    "issue_id": issue_id,
+                    "worker_session_id": worker_session.session_id,
+                    "parent_id": parent_id,
+                },
+            )
+
             # Also register the capability so tools can access it
             if parent_working_dir:
                 worker_session.coordinator.register_capability(
@@ -758,11 +816,23 @@ When done, update the issue with your results:
                 logger.info(f"Worker session using working_dir: {parent_working_dir}")
 
             try:
+                # Diagnostic: Worker execution starting
+                await self._emit_diagnostic(
+                    "foreman:worker:execution_starting",
+                    {"issue_id": issue_id, "worker_session_id": worker_session.session_id},
+                )
+
                 # Execute the worker instruction
                 logger.info(f"Executing worker for issue {issue_id}")
                 await worker_session.execute(worker_prompt)
                 logger.info(
                     f"Worker completed for issue {issue_id}, session: {worker_session.session_id}"
+                )
+
+                # Diagnostic: Worker execution completed
+                await self._emit_diagnostic(
+                    "foreman:worker:execution_completed",
+                    {"issue_id": issue_id, "worker_session_id": worker_session.session_id},
                 )
             finally:
                 # Always cleanup the worker session
@@ -772,6 +842,12 @@ When done, update the issue with your results:
             error = f"Worker execution failed for issue {issue_id}: {e}"
             logger.error(error, exc_info=True)
             self._append_spawn_error(issue_id, f"Worker execution failed: {e}")
+
+            # Diagnostic: Worker execution failed
+            await self._emit_diagnostic(
+                "foreman:worker:execution_failed",
+                {"issue_id": issue_id, "error": str(e)},
+            )
 
     def _route_issue(self, issue: dict[str, Any]) -> dict[str, Any] | None:
         """Route issue to appropriate worker pool based on metadata."""
