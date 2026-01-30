@@ -369,28 +369,3 @@ Before marking issue as completed:
 - [ ] Issue status updated
 
 @testing-worker:context/instructions.md
-
----
-
-tools:
-  # File reading
-  - module: tool-filesystem
-    source: git+https://github.com/microsoft/amplifier-module-tool-filesystem@main
-    config:
-      allowed_write_paths:
-        - "tests/**"  # Can only write test files
-      # Cannot write to: src/, config files, docs/
-  
-  # Test execution
-  - module: tool-bash
-    source: git+https://github.com/microsoft/amplifier-module-tool-bash@main
-  
-  # Issue queue integration
-  - module: tool-issue
-    source: git+https://github.com/microsoft/amplifier-bundle-issues@main
-  
-  # Python code quality
-  - module: python-check
-    source: git+https://github.com/microsoft/amplifier-bundle-python-dev@main
-
-# Note: No web tools (not needed), can write tests but not production code

@@ -175,29 +175,3 @@ If you need something outside these boundaries, update the issue to `blocked` or
 - Keep updates concise but complete
 
 @coding-worker:context/instructions.md
-
----
-
-tools:
-  # File operations - restricted write access
-  - module: tool-filesystem
-    source: git+https://github.com/microsoft/amplifier-module-tool-filesystem@main
-    config:
-      allowed_write_paths:
-        - "src/**"
-        - "tests/**"
-      # Cannot write to: config files, .env, README, docs/
-  
-  # Code execution
-  - module: tool-bash
-    source: git+https://github.com/microsoft/amplifier-module-tool-bash@main
-  
-  # Issue queue integration
-  - module: tool-issue
-    source: git+https://github.com/microsoft/amplifier-bundle-issues@main
-  
-  # Python code quality
-  - module: python-check
-    source: git+https://github.com/microsoft/amplifier-bundle-python-dev@main
-
-# Note: No web tools, no task tool - focused capabilities only

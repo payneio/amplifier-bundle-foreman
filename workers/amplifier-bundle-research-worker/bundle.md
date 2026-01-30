@@ -306,25 +306,3 @@ Before marking issue as completed:
 - [ ] Issue status updated clearly
 
 @research-worker:context/instructions.md
-
----
-
-tools:
-  # Web research capabilities
-  - module: tool-web-search
-    source: git+https://github.com/microsoft/amplifier-module-tool-web-search@main
-  
-  - module: tool-web-fetch
-    source: git+https://github.com/microsoft/amplifier-module-tool-web-fetch@main
-  
-  # File reading - NO write access
-  - module: tool-filesystem
-    source: git+https://github.com/microsoft/amplifier-module-tool-filesystem@main
-    config:
-      allowed_write_paths: []  # Read-only: empty write list
-  
-  # Issue queue integration
-  - module: tool-issue
-    source: git+https://github.com/microsoft/amplifier-bundle-issues@main
-
-# Note: No bash tool (no command execution), no task tool (no worker spawning)
