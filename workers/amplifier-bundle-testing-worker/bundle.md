@@ -6,6 +6,7 @@ bundle:
 
 includes:
   - bundle: git+https://github.com/microsoft/amplifier-foundation@main
+  - bundle: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=behaviors/logging.yaml
   - bundle: git+https://github.com/microsoft/amplifier-bundle-issues@main#subdirectory=behaviors/issues.yaml
 ---
 
@@ -57,6 +58,7 @@ Before creating new tests:
 
 ### 3. Run and Validate
 Execute tests systematically:
+- If using python, you should use uv to run tests
 - Run existing tests to establish baseline
 - Run specific tests related to changes
 - Run full test suite if needed
@@ -68,6 +70,7 @@ Write quality tests:
 - Test happy paths and edge cases
 - Use descriptive test names
 - Keep tests isolated and focused
+- If using python, you should use uv for test dependencies
 
 ### 5. Update Issue Status
 
