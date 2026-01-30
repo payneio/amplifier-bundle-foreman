@@ -41,4 +41,6 @@ htmlcov/
 # mypy
 .mypy_cache/
 .amplifier
-derp
+
+test-*/
+.working
