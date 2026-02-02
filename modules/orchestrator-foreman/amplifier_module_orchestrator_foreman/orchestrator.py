@@ -891,7 +891,21 @@ When done, update the issue with your results:
             # The session's project directory is determined at creation based on this
             from pathlib import Path
 
+            from amplifier_foundation import generate_sub_session_id
+
+            # Generate traceable session ID using W3C Trace Context pattern
+            # Format: {parent-span}-{child-span}_{agent-name}
+            # This creates a lineage chain visible in session listings
+            worker_session_id = generate_sub_session_id(
+                agent_name=f"worker-{issue_id[:8]}",
+                parent_session_id=parent_id,
+                parent_trace_id=getattr(parent_session, "trace_id", None)
+                if parent_session
+                else None,
+            )
+
             worker_session = await prepared.create_session(
+                session_id=worker_session_id,
                 parent_id=parent_id,
                 approval_system=approval_system,
                 display_system=display_system,
