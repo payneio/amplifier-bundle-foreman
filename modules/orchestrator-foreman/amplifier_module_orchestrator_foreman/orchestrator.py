@@ -203,6 +203,105 @@ class ForemanOrchestrator:
             f"{len(self._worker_tasks)} tasks remaining"
         )
 
+    async def _write_worker_session_state(
+        self,
+        worker_session: Any,
+        bundle_name: str,
+        issue_id: str,
+        working_dir: str | None,
+    ) -> None:
+        """Write metadata.json and transcript.jsonl for a worker session.
+
+        Workers spawned via PreparedBundle.create_session() bypass the CLI's
+        SessionStore, so we need to write these files manually for the sessions
+        to appear in session listings and be resumable.
+
+        Args:
+            worker_session: The completed worker AmplifierSession
+            bundle_name: Name of the worker bundle
+            issue_id: Issue ID this worker handled (for logging)
+            working_dir: Parent's working directory for project slug derivation
+        """
+        import json
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        try:
+            # Derive project slug from working directory (same logic as hooks-logging)
+            if working_dir:
+                cwd = Path(working_dir).resolve()
+            else:
+                cwd = Path.cwd().resolve()
+            slug = str(cwd).replace("/", "-").replace("\\", "-").replace(":", "")
+            if not slug.startswith("-"):
+                slug = "-" + slug
+
+            # Build session directory path
+            session_dir = (
+                Path.home()
+                / ".amplifier"
+                / "projects"
+                / slug
+                / "sessions"
+                / worker_session.session_id
+            )
+            session_dir.mkdir(parents=True, exist_ok=True)
+
+            # Get model from session config
+            model = "unknown"
+            if hasattr(worker_session, "config") and worker_session.config:
+                providers = worker_session.config.get("providers", [])
+                if providers and isinstance(providers, list) and len(providers) > 0:
+                    first_provider = providers[0]
+                    if isinstance(first_provider, dict):
+                        model = first_provider.get("config", {}).get("model", "unknown")
+
+            # Write metadata.json
+            metadata = {
+                "session_id": worker_session.session_id,
+                "parent_id": getattr(worker_session, "parent_id", None),
+                "created": datetime.now(timezone.utc).isoformat(),
+                "bundle": f"bundle:{bundle_name}",
+                "model": model,
+                "turn_count": 1,
+                "issue_id": issue_id,  # Extra field for foreman tracking
+                "incremental": True,
+            }
+            metadata_path = session_dir / "metadata.json"
+            with open(metadata_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+
+            # Write transcript.jsonl from context messages
+            transcript_path = session_dir / "transcript.jsonl"
+            context = worker_session.coordinator.get("context")
+            if context and hasattr(context, "get_messages"):
+                messages = await context.get_messages()
+                with open(transcript_path, "w") as f:
+                    for msg in messages:
+                        # Add timestamp if not present
+                        if "timestamp" not in msg:
+                            msg = {**msg, "timestamp": datetime.now(timezone.utc).isoformat()}
+                        f.write(json.dumps(msg) + "\n")
+
+            logger.info(
+                f"Wrote session state for worker {worker_session.session_id} "
+                f"(issue {issue_id}) to {session_dir}"
+            )
+
+            # Diagnostic: Session state written
+            await self._emit_diagnostic(
+                "foreman:worker:session_state_written",
+                {
+                    "issue_id": issue_id,
+                    "worker_session_id": worker_session.session_id,
+                    "session_dir": str(session_dir),
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to write worker session state for issue {issue_id}: {e}")
+            # Don't raise - this is non-critical, worker already completed
+
     def get_worker_status(self) -> dict[str, str]:
         """Get status of all tracked worker tasks.
 
@@ -340,6 +439,7 @@ class ForemanOrchestrator:
         # Add the user message to context at the start of execution
         # This ensures proper conversation state management
         await context.add_message({"role": "user", "content": prompt})
+
         # Get primary provider
         provider_name = next(iter(providers.keys()), None)
         if not provider_name:
@@ -833,6 +933,15 @@ When done, update the issue with your results:
                 await self._emit_diagnostic(
                     "foreman:worker:execution_completed",
                     {"issue_id": issue_id, "worker_session_id": worker_session.session_id},
+                )
+
+                # Write worker session state (metadata.json, transcript.jsonl)
+                # This is normally done by CLI's SessionStore, but workers bypass that
+                await self._write_worker_session_state(
+                    worker_session=worker_session,
+                    bundle_name=bundle.name,
+                    issue_id=issue_id,
+                    working_dir=parent_working_dir,
                 )
             finally:
                 # Always cleanup the worker session
