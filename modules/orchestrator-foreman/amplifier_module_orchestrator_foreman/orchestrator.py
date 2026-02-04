@@ -5,6 +5,7 @@ This orchestrator runs a standard agent loop but guides the LLM to coordinate wo
 through issues and background workers rather than doing everything directly.
 
 Uses spawn_bundle() as the core primitive for worker session spawning.
+Supports declarative background_sessions for event-driven orchestration.
 """
 
 import asyncio
@@ -18,6 +19,21 @@ from typing import Any, Protocol, runtime_checkable
 from amplifier_core import HookRegistry, ToolSpec
 from amplifier_core.events import ORCHESTRATOR_COMPLETE, PROMPT_SUBMIT
 from amplifier_core.message_models import ChatRequest, Message
+
+# Optional: BackgroundSessionManager for event-driven background sessions
+try:
+    from amplifier_foundation import (
+        BackgroundSessionConfig,
+        BackgroundSessionManager,
+        EventRouter,
+    )
+
+    HAS_BACKGROUND_SESSIONS = True
+except ImportError:
+    HAS_BACKGROUND_SESSIONS = False
+    BackgroundSessionManager = None  # type: ignore
+    BackgroundSessionConfig = None  # type: ignore
+    EventRouter = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +245,11 @@ class ForemanOrchestrator:
         # Store hooks reference for diagnostic events in async tasks
         self._hooks: Any = None
 
+        # Background session support (event-driven orchestration)
+        self._background_sessions_config = config.get("background_sessions", [])
+        self._background_manager: Any = None
+        self._event_router: Any = None
+
         # Validate configuration
         self._validate_config()
 
@@ -266,6 +287,74 @@ class ForemanOrchestrator:
             # Check for name (required for routing)
             if not pool.get("name"):
                 logger.warning(f"Worker pool #{i} is missing a name - routing may fail")
+
+    async def _maybe_start_background_sessions(self, coordinator: Any) -> None:
+        """Initialize and start background sessions if configured.
+
+        Background sessions are event-driven sessions that run alongside the
+        main foreman loop, responding to triggers (timers, file changes, events).
+        """
+        if not self._background_sessions_config:
+            return
+
+        if not HAS_BACKGROUND_SESSIONS:
+            logger.warning(
+                "background_sessions configured but amplifier-foundation "
+                "BackgroundSessionManager not available. Install amplifier-foundation>=X.Y.Z"
+            )
+            return
+
+        # Get parent session for spawning context
+        parent_session = getattr(coordinator, "session", None)
+        if not parent_session:
+            logger.warning("Cannot start background sessions: no parent session available")
+            return
+
+        # Create shared event router for cross-session communication
+        # Type assertions: These are non-None when HAS_BACKGROUND_SESSIONS is True
+        assert EventRouter is not None
+        assert BackgroundSessionManager is not None
+        assert BackgroundSessionConfig is not None
+
+        self._event_router = EventRouter()
+
+        # Create background session manager
+        self._background_manager = BackgroundSessionManager(
+            parent_session=parent_session,
+            event_router=self._event_router,
+        )
+
+        # Start each configured background session
+        for bg_config in self._background_sessions_config:
+            try:
+                config = BackgroundSessionConfig(
+                    name=bg_config.get("name", "unnamed"),
+                    bundle=bg_config.get("bundle"),
+                    triggers=bg_config.get("triggers", []),
+                    instruction_template=bg_config.get("instruction_template"),
+                    pool_size=bg_config.get("pool_size", 1),
+                    on_complete_emit=bg_config.get("on_complete_emit"),
+                    on_error_emit=bg_config.get("on_error_emit"),
+                    restart_on_failure=bg_config.get("restart_on_failure", False),
+                    max_restarts=bg_config.get("max_restarts", 3),
+                )
+
+                session_id = await self._background_manager.start(config)
+                logger.info(f"Started background session '{config.name}': {session_id}")
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to start background session '{bg_config.get('name', '?')}': {e}"
+                )
+
+    async def _stop_background_sessions(self) -> None:
+        """Stop all background sessions gracefully."""
+        if self._background_manager:
+            try:
+                await self._background_manager.stop_all()
+                logger.info("Stopped all background sessions")
+            except Exception as e:
+                logger.error(f"Error stopping background sessions: {e}")
 
     def _spawn_worker_task(self, issue_id: str, coro) -> None:
         """Spawn a worker as an asyncio task and track it.
@@ -443,6 +532,9 @@ class ForemanOrchestrator:
         self._coordinator = coordinator
         self._hooks = hooks  # Store for diagnostic events in async tasks
 
+        # Initialize and start background sessions (if configured)
+        await self._maybe_start_background_sessions(coordinator)
+
         # Emit prompt submit event (CRITICAL for session state management)
         prompt_submit_result = await hooks.emit(PROMPT_SUBMIT, {"prompt": prompt})
         if coordinator:
@@ -584,6 +676,12 @@ class ForemanOrchestrator:
 
         # Emit execution end event
         await hooks.emit("execution:end", {})
+
+        # Stop background sessions (they run for the duration of the foreman session)
+        # Note: In interactive mode, background sessions persist across execute() calls.
+        # They are only stopped when the orchestrator is explicitly shut down.
+        # For now, we don't stop them here - they continue running.
+        # TODO: Add explicit shutdown hook or let them run until CLI exits.
 
         return final_response
 
