@@ -358,16 +358,26 @@ class TestPreparedBundleSpawnPattern:
 # =============================================================================
 
 
-class TestCurrentImplementationBehavior:
-    """Tests documenting current implementation behavior.
+class TestSpawnBundleImplementation:
+    """Tests for the spawn_bundle() based implementation.
 
-    These tests document how the current (broken) implementation behaves,
-    helping to ensure we understand what needs to change.
+    The foreman now uses spawn_bundle() from amplifier_foundation directly,
+    which is the canonical pattern for session spawning. This provides:
+    - Consistent behavior with CLI and other spawn points
+    - Proper session lifecycle events (SESSION_COMPLETED, SESSION_ERROR)
+    - Standardized persistence via SessionStorage protocol
     """
 
     @pytest.mark.asyncio
-    async def test_current_impl_requests_wrong_capabilities(self):
-        """Document: Current implementation requests bundle.load and session.AmplifierSession."""
+    async def test_spawn_uses_spawn_bundle_directly(self):
+        """Verify implementation uses spawn_bundle() from foundation.
+
+        The foreman now imports spawn_bundle inside _run_spawn_and_handle_result
+        and uses it directly instead of requesting bundle.load capability.
+        """
+        import asyncio
+        from unittest.mock import patch
+
         config = {
             "worker_pools": [
                 {
@@ -383,35 +393,61 @@ class TestCurrentImplementationBehavior:
         # Track which capabilities are requested
         requested_capabilities: list[str] = []
 
-        def track_capability(name: str) -> None:
+        def track_capability(name: str) -> Any:
             requested_capabilities.append(name)
+            # Return working_dir for the spawn to use
+            if name == "session.working_dir":
+                return "/test/working/dir"
             return None
 
+        # Set up coordinator with properly nested session structure
+        # The orchestrator calls parent_session.coordinator.get_capability()
         coordinator = MagicMock()
-        coordinator.session = MagicMock(id="test-session")
-        coordinator.get_capability = track_capability
+        coordinator.session = MagicMock()
+        coordinator.session.session_id = "test-session"
+        coordinator.session.config = {"providers": []}
+        # The capability is requested from the session's coordinator
+        coordinator.session.coordinator = MagicMock()
+        coordinator.session.coordinator.get_capability = track_capability
         coordinator.tools = {}
         orch._coordinator = coordinator
 
         issue_tool = MockIssueTool()
 
-        await orch._maybe_spawn_worker(
-            {"issue": {"id": "issue-5", "title": "Test", "metadata": {"type": "task"}}},
-            issue_tool,
-        )
+        # Mock spawn_bundle at the source module level
+        mock_result = MagicMock()
+        mock_result.session_id = "worker-session-123"
+        mock_result.output = "Worker completed"
 
-        # Document: Current implementation requests these capabilities
-        # These are NOT the correct capabilities to use
-        assert "bundle.load" in requested_capabilities
-        # After bundle.load returns None, it may not request session.AmplifierSession
+        # Patch at source since it's imported inside the method
+        with patch(
+            "amplifier_foundation.spawn.spawn_bundle",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
+            await orch._maybe_spawn_worker(
+                {"issue": {"id": "issue-5", "title": "Test", "metadata": {"type": "task"}}},
+                issue_tool,
+            )
 
-        # The CORRECT capabilities to request would be:
-        # - "session.spawn" (canonical pattern)
-        # - OR "prepared_bundle" (direct pattern)
+            # Wait for background task to complete
+            await asyncio.sleep(0.1)
+            # Gather all pending tasks for this orchestrator
+            if orch._worker_tasks:
+                await asyncio.gather(*orch._worker_tasks.values(), return_exceptions=True)
+
+        # The new implementation uses spawn_bundle() directly, which only needs
+        # session.working_dir capability - it doesn't request bundle.load anymore
+        assert "bundle.load" not in requested_capabilities
+        # Working dir is requested for path context
+        assert "session.working_dir" in requested_capabilities
 
     @pytest.mark.asyncio
-    async def test_current_impl_error_tracking(self):
-        """Verify current implementation tracks spawn errors correctly."""
+    async def test_spawn_error_tracking(self):
+        """Verify spawn errors are tracked correctly."""
+        import asyncio
+        from unittest.mock import patch
+
         config = {
             "worker_pools": [
                 {
@@ -425,21 +461,35 @@ class TestCurrentImplementationBehavior:
         orch = ForemanOrchestrator(config)
 
         coordinator = MagicMock()
-        coordinator.session = MagicMock(id="test-session")
+        coordinator.session = MagicMock()
+        coordinator.session.session_id = "test-session"
+        coordinator.session.config = {"providers": []}
         coordinator.get_capability = lambda name: None  # No capabilities
         coordinator.tools = {}
         orch._coordinator = coordinator
 
         issue_tool = MockIssueTool()
 
-        await orch._maybe_spawn_worker(
-            {"issue": {"id": "issue-6", "title": "Test", "metadata": {"type": "task"}}},
-            issue_tool,
-        )
+        # Mock spawn_bundle to raise an error
+        with patch(
+            "amplifier_foundation.spawn.spawn_bundle",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("Bundle not found"),
+        ):
+            await orch._maybe_spawn_worker(
+                {"issue": {"id": "issue-6", "title": "Test", "metadata": {"type": "task"}}},
+                issue_tool,
+            )
+
+            # Wait for background task to complete (and fail)
+            await asyncio.sleep(0.1)
+            if orch._worker_tasks:
+                await asyncio.gather(*orch._worker_tasks.values(), return_exceptions=True)
 
         # Verify error was recorded
         assert len(orch._spawn_errors) > 0
-        assert "bundle.load" in orch._spawn_errors[0]
+        # Error message will mention the failure
+        assert "failed" in orch._spawn_errors[0].lower()
 
 
 # =============================================================================
@@ -581,6 +631,9 @@ class TestEndToEndSpawnFlow:
     @pytest.mark.asyncio
     async def test_issue_creation_triggers_spawn(self):
         """Test that creating an issue triggers worker spawn."""
+        import asyncio
+        from unittest.mock import patch
+
         config = {
             "worker_pools": [
                 {
@@ -593,10 +646,15 @@ class TestEndToEndSpawnFlow:
         }
         orch = ForemanOrchestrator(config)
 
-        # Setup coordinator
+        # Setup coordinator with proper session structure
         coordinator = MagicMock()
-        coordinator.session = MagicMock(id="parent-123")
-        coordinator.get_capability = lambda name: None
+        coordinator.session = MagicMock()
+        coordinator.session.session_id = "parent-123"
+        coordinator.session.config = {"providers": []}
+        coordinator.session.coordinator = MagicMock()
+        coordinator.session.coordinator.get_capability = lambda name: (
+            "/test/dir" if name == "session.working_dir" else None
+        )
         coordinator.tools = {}
         orch._coordinator = coordinator
 
@@ -612,20 +670,38 @@ class TestEndToEndSpawnFlow:
             }
         }
 
-        # Spawn should be attempted
-        await orch._maybe_spawn_worker(issue_result, issue_tool)
+        # Mock spawn_bundle to avoid actual bundle loading
+        mock_result = MagicMock()
+        mock_result.session_id = "worker-session-123"
+        mock_result.output = "Worker completed"
+
+        with patch(
+            "amplifier_foundation.spawn.spawn_bundle",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
+            # Spawn should be attempted
+            await orch._maybe_spawn_worker(issue_result, issue_tool)
+
+            # Wait for background task to complete
+            await asyncio.sleep(0.1)
+            if orch._worker_tasks:
+                await asyncio.gather(*orch._worker_tasks.values(), return_exceptions=True)
 
         # Issue should be tracked
         assert "issue-100" in orch._spawned_issues
 
-        # Issue should be updated to in_progress
-        update_calls = [c for c in issue_tool.calls if c.get("operation") == "update"]
-        assert len(update_calls) == 1
-        assert update_calls[0]["params"]["status"] == "in_progress"
+        # NOTE: The orchestrator intentionally does NOT set in_progress directly.
+        # Instead, the worker is instructed to claim the issue itself, which
+        # provides more accurate lifecycle tracking. The worker prompt contains
+        # instructions to update status to "in_progress" as its first step.
+        # So we verify the issue is tracked for spawning, not that it was updated.
 
     @pytest.mark.asyncio
     async def test_duplicate_spawn_prevention(self):
         """Test that same issue is not spawned twice."""
+        from unittest.mock import patch
+
         config = {
             "worker_pools": [
                 {
@@ -638,21 +714,37 @@ class TestEndToEndSpawnFlow:
         }
         orch = ForemanOrchestrator(config)
 
+        # Setup coordinator with proper session structure
         coordinator = MagicMock()
-        coordinator.session = MagicMock(id="parent-123")
-        coordinator.get_capability = lambda name: None
+        coordinator.session = MagicMock()
+        coordinator.session.session_id = "parent-123"
+        coordinator.session.config = {"providers": []}
+        coordinator.session.coordinator = MagicMock()
+        coordinator.session.coordinator.get_capability = lambda name: (
+            "/test/dir" if name == "session.working_dir" else None
+        )
         coordinator.tools = {}
         orch._coordinator = coordinator
 
         issue_tool = MockIssueTool()
         issue_result = {"issue": {"id": "issue-dup", "title": "Test", "metadata": {"type": "task"}}}
 
-        # First spawn
-        await orch._maybe_spawn_worker(issue_result, issue_tool)
-        first_call_count = len(issue_tool.calls)
+        # Mock spawn_bundle to avoid actual bundle loading
+        mock_result = MagicMock()
+        mock_result.session_id = "worker-session-123"
+        mock_result.output = "Worker completed"
 
-        # Second spawn attempt (same issue)
-        await orch._maybe_spawn_worker(issue_result, issue_tool)
+        with patch(
+            "amplifier_foundation.spawn.spawn_bundle",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
+            # First spawn
+            await orch._maybe_spawn_worker(issue_result, issue_tool)
+            first_call_count = len(issue_tool.calls)
 
-        # Should not have made additional calls
-        assert len(issue_tool.calls) == first_call_count
+            # Second spawn attempt (same issue)
+            await orch._maybe_spawn_worker(issue_result, issue_tool)
+
+            # Should not have made additional calls
+            assert len(issue_tool.calls) == first_call_count
