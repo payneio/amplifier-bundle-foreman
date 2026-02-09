@@ -364,7 +364,7 @@ class TestSpawnBundleImplementation:
     The foreman now uses spawn_bundle() from amplifier_foundation directly,
     which is the canonical pattern for session spawning. This provides:
     - Consistent behavior with CLI and other spawn points
-    - Proper session lifecycle events (SESSION_COMPLETED, SESSION_ERROR)
+    - Proper session lifecycle events (session:end with status in payload)
     - Standardized persistence via SessionStorage protocol
     """
 
