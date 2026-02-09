@@ -22,7 +22,7 @@ from amplifier_core.message_models import ChatRequest, Message
 
 # Optional: BackgroundSessionManager for event-driven background sessions
 try:
-    from amplifier_foundation import (
+    from amplifier_orchestration import (
         BackgroundSessionConfig,
         BackgroundSessionManager,
         EventRouter,
@@ -299,8 +299,8 @@ class ForemanOrchestrator:
 
         if not HAS_BACKGROUND_SESSIONS:
             logger.warning(
-                "background_sessions configured but amplifier-foundation "
-                "BackgroundSessionManager not available. Install amplifier-foundation>=X.Y.Z"
+                "background_sessions configured but BackgroundSessionManager not available. "
+                "Install amplifier-bundle-orchestration for background session support."
             )
             return
 
