@@ -43,6 +43,29 @@ session:
           - if_metadata_type: [chore]
             then_pool: testing-pool
 
+      # Background sessions - event-driven sessions that run alongside foreman
+      # These respond to triggers (timers, events) without user interaction
+      background_sessions:
+        # Example: Periodic status reporter
+        - name: status-reporter
+          bundle: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=workers/amplifier-bundle-status-reporter
+          triggers:
+            - type: timer
+              config:
+                interval_seconds: 300  # Every 5 minutes
+          instruction_template: "Check issue queue and report any stale or blocked issues"
+          on_complete_emit: "status:reported"
+
+        # Example: Worker completion handler
+        - name: completion-handler
+          bundle: git+https://github.com/payneio/amplifier-bundle-foreman@main#subdirectory=workers/amplifier-bundle-completion-handler
+          triggers:
+            - type: session_event
+              config:
+                event_names: ["worker:completed", "worker:failed"]
+          instruction_template: "Process worker completion event: {trigger.data}"
+          on_complete_emit: "completion:processed"
+
   context:
     module: context-simple
     source: git+https://github.com/microsoft/amplifier-module-context-simple@main

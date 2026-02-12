@@ -3,19 +3,153 @@ Foreman Orchestrator - LLM-driven work coordination through issues and workers.
 
 This orchestrator runs a standard agent loop but guides the LLM to coordinate work
 through issues and background workers rather than doing everything directly.
+
+Uses spawn_bundle() as the core primitive for worker session spawning.
+Supports declarative background_sessions for event-driven orchestration.
 """
 
 import asyncio
 import json
 import logging
 import os
-from typing import Any
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
 from amplifier_core import HookRegistry, ToolSpec
 from amplifier_core.events import ORCHESTRATOR_COMPLETE, PROMPT_SUBMIT
 from amplifier_core.message_models import ChatRequest, Message
 
+# Optional: BackgroundSessionManager for event-driven background sessions
+try:
+    from amplifier_orchestration import (
+        BackgroundSessionConfig,
+        BackgroundSessionManager,
+        EventRouter,
+    )
+
+    HAS_BACKGROUND_SESSIONS = True
+except ImportError:
+    HAS_BACKGROUND_SESSIONS = False
+    BackgroundSessionManager = None  # type: ignore
+    BackgroundSessionConfig = None  # type: ignore
+    EventRouter = None  # type: ignore
+
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Session Storage for Foreman Workers
+# ============================================================================
+
+
+@runtime_checkable
+class SessionStorage(Protocol):
+    """Protocol for session persistence (matches foundation's SessionStorage)."""
+
+    def save(self, session_id: str, transcript: list[dict], metadata: dict[str, Any]) -> None:
+        """Save session state."""
+        ...
+
+    def load(self, session_id: str) -> tuple[list[dict], dict[str, Any]] | None:
+        """Load session state."""
+        ...
+
+
+class ForemanSessionStorage:
+    """Session storage implementation for foreman workers.
+
+    Writes session state to the standard Amplifier project sessions directory:
+    ~/.amplifier/projects/{slug}/sessions/{session_id}/
+
+    This enables workers to appear in session listings and be resumable.
+    """
+
+    def __init__(self, working_dir: str | None = None, issue_id: str | None = None):
+        """Initialize storage with context.
+
+        Args:
+            working_dir: Working directory for project slug derivation
+            issue_id: Issue ID for foreman tracking metadata
+        """
+        self.working_dir = working_dir
+        self.issue_id = issue_id
+
+    def _get_session_dir(self, session_id: str) -> Path:
+        """Get the session directory path."""
+        # Derive project slug from working directory (same logic as hooks-logging)
+        if self.working_dir:
+            cwd = Path(self.working_dir).resolve()
+        else:
+            cwd = Path.cwd().resolve()
+
+        slug = str(cwd).replace("/", "-").replace("\\", "-").replace(":", "")
+        if not slug.startswith("-"):
+            slug = "-" + slug
+
+        return Path.home() / ".amplifier" / "projects" / slug / "sessions" / session_id
+
+    def save(self, session_id: str, transcript: list[dict], metadata: dict[str, Any]) -> None:
+        """Save session state to filesystem.
+
+        Args:
+            session_id: The session ID
+            transcript: List of message dicts from context
+            metadata: Session metadata dict
+        """
+        session_dir = self._get_session_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Add foreman-specific metadata
+        if self.issue_id:
+            metadata["issue_id"] = self.issue_id
+        metadata["incremental"] = True
+
+        # Write metadata.json
+        metadata_path = session_dir / "metadata.json"
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        # Write transcript.jsonl
+        transcript_path = session_dir / "transcript.jsonl"
+        with open(transcript_path, "w") as f:
+            for msg in transcript:
+                # Add timestamp if not present
+                if "timestamp" not in msg:
+                    msg = {**msg, "timestamp": datetime.now(timezone.utc).isoformat()}
+                f.write(json.dumps(msg) + "\n")
+
+        logger.info(f"Saved worker session {session_id} to {session_dir}")
+
+    def load(self, session_id: str) -> tuple[list[dict], dict[str, Any]] | None:
+        """Load session state from filesystem.
+
+        Args:
+            session_id: The session ID to load
+
+        Returns:
+            Tuple of (transcript, metadata) or None if not found
+        """
+        session_dir = self._get_session_dir(session_id)
+
+        metadata_path = session_dir / "metadata.json"
+        transcript_path = session_dir / "transcript.jsonl"
+
+        if not metadata_path.exists():
+            return None
+
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+
+        transcript = []
+        if transcript_path.exists():
+            with open(transcript_path) as f:
+                for line in f:
+                    if line.strip():
+                        transcript.append(json.loads(line))
+
+        return transcript, metadata
+
 
 # System prompt that makes the LLM act as a foreman
 FOREMAN_SYSTEM_PROMPT = """You are a FOREMAN - a work coordinator who delegates tasks to specialized workers.
@@ -111,6 +245,11 @@ class ForemanOrchestrator:
         # Store hooks reference for diagnostic events in async tasks
         self._hooks: Any = None
 
+        # Background session support (event-driven orchestration)
+        self._background_sessions_config = config.get("background_sessions", [])
+        self._background_manager: Any = None
+        self._event_router: Any = None
+
         # Validate configuration
         self._validate_config()
 
@@ -148,6 +287,74 @@ class ForemanOrchestrator:
             # Check for name (required for routing)
             if not pool.get("name"):
                 logger.warning(f"Worker pool #{i} is missing a name - routing may fail")
+
+    async def _maybe_start_background_sessions(self, coordinator: Any) -> None:
+        """Initialize and start background sessions if configured.
+
+        Background sessions are event-driven sessions that run alongside the
+        main foreman loop, responding to triggers (timers, file changes, events).
+        """
+        if not self._background_sessions_config:
+            return
+
+        if not HAS_BACKGROUND_SESSIONS:
+            logger.warning(
+                "background_sessions configured but BackgroundSessionManager not available. "
+                "Install amplifier-bundle-orchestration for background session support."
+            )
+            return
+
+        # Get parent session for spawning context
+        parent_session = getattr(coordinator, "session", None)
+        if not parent_session:
+            logger.warning("Cannot start background sessions: no parent session available")
+            return
+
+        # Create shared event router for cross-session communication
+        # Type assertions: These are non-None when HAS_BACKGROUND_SESSIONS is True
+        assert EventRouter is not None
+        assert BackgroundSessionManager is not None
+        assert BackgroundSessionConfig is not None
+
+        self._event_router = EventRouter()
+
+        # Create background session manager
+        self._background_manager = BackgroundSessionManager(
+            parent_session=parent_session,
+            event_router=self._event_router,
+        )
+
+        # Start each configured background session
+        for bg_config in self._background_sessions_config:
+            try:
+                config = BackgroundSessionConfig(
+                    name=bg_config.get("name", "unnamed"),
+                    bundle=bg_config.get("bundle"),
+                    triggers=bg_config.get("triggers", []),
+                    instruction_template=bg_config.get("instruction_template"),
+                    pool_size=bg_config.get("pool_size", 1),
+                    on_complete_emit=bg_config.get("on_complete_emit"),
+                    on_error_emit=bg_config.get("on_error_emit"),
+                    restart_on_failure=bg_config.get("restart_on_failure", False),
+                    max_restarts=bg_config.get("max_restarts", 3),
+                )
+
+                session_id = await self._background_manager.start(config)
+                logger.info(f"Started background session '{config.name}': {session_id}")
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to start background session '{bg_config.get('name', '?')}': {e}"
+                )
+
+    async def _stop_background_sessions(self) -> None:
+        """Stop all background sessions gracefully."""
+        if self._background_manager:
+            try:
+                await self._background_manager.stop_all()
+                logger.info("Stopped all background sessions")
+            except Exception as e:
+                logger.error(f"Error stopping background sessions: {e}")
 
     def _spawn_worker_task(self, issue_id: str, coro) -> None:
         """Spawn a worker as an asyncio task and track it.
@@ -202,105 +409,6 @@ class ForemanOrchestrator:
             f"Worker task for issue {issue_id} cleaned up, "
             f"{len(self._worker_tasks)} tasks remaining"
         )
-
-    async def _write_worker_session_state(
-        self,
-        worker_session: Any,
-        bundle_name: str,
-        issue_id: str,
-        working_dir: str | None,
-    ) -> None:
-        """Write metadata.json and transcript.jsonl for a worker session.
-
-        Workers spawned via PreparedBundle.create_session() bypass the CLI's
-        SessionStore, so we need to write these files manually for the sessions
-        to appear in session listings and be resumable.
-
-        Args:
-            worker_session: The completed worker AmplifierSession
-            bundle_name: Name of the worker bundle
-            issue_id: Issue ID this worker handled (for logging)
-            working_dir: Parent's working directory for project slug derivation
-        """
-        import json
-        from datetime import datetime, timezone
-        from pathlib import Path
-
-        try:
-            # Derive project slug from working directory (same logic as hooks-logging)
-            if working_dir:
-                cwd = Path(working_dir).resolve()
-            else:
-                cwd = Path.cwd().resolve()
-            slug = str(cwd).replace("/", "-").replace("\\", "-").replace(":", "")
-            if not slug.startswith("-"):
-                slug = "-" + slug
-
-            # Build session directory path
-            session_dir = (
-                Path.home()
-                / ".amplifier"
-                / "projects"
-                / slug
-                / "sessions"
-                / worker_session.session_id
-            )
-            session_dir.mkdir(parents=True, exist_ok=True)
-
-            # Get model from session config
-            model = "unknown"
-            if hasattr(worker_session, "config") and worker_session.config:
-                providers = worker_session.config.get("providers", [])
-                if providers and isinstance(providers, list) and len(providers) > 0:
-                    first_provider = providers[0]
-                    if isinstance(first_provider, dict):
-                        model = first_provider.get("config", {}).get("model", "unknown")
-
-            # Write metadata.json
-            metadata = {
-                "session_id": worker_session.session_id,
-                "parent_id": getattr(worker_session, "parent_id", None),
-                "created": datetime.now(timezone.utc).isoformat(),
-                "bundle": f"bundle:{bundle_name}",
-                "model": model,
-                "turn_count": 1,
-                "issue_id": issue_id,  # Extra field for foreman tracking
-                "incremental": True,
-            }
-            metadata_path = session_dir / "metadata.json"
-            with open(metadata_path, "w") as f:
-                json.dump(metadata, f, indent=2)
-
-            # Write transcript.jsonl from context messages
-            transcript_path = session_dir / "transcript.jsonl"
-            context = worker_session.coordinator.get("context")
-            if context and hasattr(context, "get_messages"):
-                messages = await context.get_messages()
-                with open(transcript_path, "w") as f:
-                    for msg in messages:
-                        # Add timestamp if not present
-                        if "timestamp" not in msg:
-                            msg = {**msg, "timestamp": datetime.now(timezone.utc).isoformat()}
-                        f.write(json.dumps(msg) + "\n")
-
-            logger.info(
-                f"Wrote session state for worker {worker_session.session_id} "
-                f"(issue {issue_id}) to {session_dir}"
-            )
-
-            # Diagnostic: Session state written
-            await self._emit_diagnostic(
-                "foreman:worker:session_state_written",
-                {
-                    "issue_id": issue_id,
-                    "worker_session_id": worker_session.session_id,
-                    "session_dir": str(session_dir),
-                },
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to write worker session state for issue {issue_id}: {e}")
-            # Don't raise - this is non-critical, worker already completed
 
     def get_worker_status(self) -> dict[str, str]:
         """Get status of all tracked worker tasks.
@@ -423,6 +531,9 @@ class ForemanOrchestrator:
         """
         self._coordinator = coordinator
         self._hooks = hooks  # Store for diagnostic events in async tasks
+
+        # Initialize and start background sessions (if configured)
+        await self._maybe_start_background_sessions(coordinator)
 
         # Emit prompt submit event (CRITICAL for session state management)
         prompt_submit_result = await hooks.emit(PROMPT_SUBMIT, {"prompt": prompt})
@@ -565,6 +676,12 @@ class ForemanOrchestrator:
 
         # Emit execution end event
         await hooks.emit("execution:end", {})
+
+        # Stop background sessions (they run for the duration of the foreman session)
+        # Note: In interactive mode, background sessions persist across execute() calls.
+        # They are only stopped when the orchestrator is explicitly shut down.
+        # For now, we don't stop them here - they continue running.
+        # TODO: Add explicit shutdown hook or let them run until CLI exits.
 
         return final_response
 
@@ -818,148 +935,109 @@ When done, update the issue with your results:
         workers execute in the background while the foreman continues
         interacting with the user.
 
-        Uses amplifier_foundation's load_bundle() and PreparedBundle.create_session()
-        to spawn complete external bundles directly, without requiring CLI support.
+        Uses spawn_bundle() as the core primitive for session spawning,
+        providing consistent behavior with CLI and other spawn points.
 
         Args:
             worker_bundle_uri: Bundle URI (git+https://..., file path, etc.)
             worker_prompt: Instruction prompt for the worker
             issue_id: Issue ID for logging and error tracking
         """
+        from amplifier_foundation.spawn import spawn_bundle
+
         # Diagnostic: Task started executing
         await self._emit_diagnostic(
             "foreman:worker:task_started",
             {"issue_id": issue_id, "bundle_uri": worker_bundle_uri},
         )
 
-        from amplifier_foundation import load_bundle
-
         try:
+            # Get parent session for inheritance
+            parent_session = getattr(self._coordinator, "session", None)
+            if not parent_session:
+                raise RuntimeError("No parent session available for worker spawning")
+
+            # Get working directory from parent - critical for file operations
+            parent_working_dir = parent_session.coordinator.get_capability("session.working_dir")
+
             # Diagnostic: Bundle loading started
             await self._emit_diagnostic(
                 "foreman:worker:bundle_loading",
                 {"issue_id": issue_id, "bundle_uri": worker_bundle_uri},
             )
 
-            # Load the worker bundle from URI
-            logger.info(f"Loading worker bundle from: {worker_bundle_uri}")
-            bundle = await load_bundle(worker_bundle_uri)
-            logger.info(f"Loaded bundle '{bundle.name}' for issue {issue_id}")
-
-            # Diagnostic: Bundle loaded successfully
-            await self._emit_diagnostic(
-                "foreman:worker:bundle_loaded",
-                {"issue_id": issue_id, "bundle_name": bundle.name},
+            # Create session storage with foreman-specific context
+            session_storage = ForemanSessionStorage(
+                working_dir=parent_working_dir,
+                issue_id=issue_id,
             )
 
-            # Get parent session for config inheritance
-            parent_session = getattr(self._coordinator, "session", None)
-            parent_id = parent_session.session_id if parent_session else None
-
-            # Inherit providers from parent session
-            # Worker bundles typically don't define providers - they inherit from foreman
-            if parent_session and parent_session.config.get("providers"):
-                parent_providers = parent_session.config["providers"]
-                if not bundle.providers:
-                    bundle.providers = list(parent_providers)
-                    logger.info(f"Inherited {len(parent_providers)} providers from parent session")
-
-            # Prepare the bundle (activates modules, creates resolver)
-            prepared = await bundle.prepare()
-            logger.info(f"Prepared bundle '{bundle.name}' for issue {issue_id}")
-
-            # Diagnostic: Bundle prepared
-            await self._emit_diagnostic(
-                "foreman:worker:bundle_prepared",
-                {"issue_id": issue_id, "bundle_name": bundle.name},
-            )
-
-            # Inherit UX systems from parent for consistent display/approval
-            approval_system = None
-            display_system = None
-            parent_working_dir = None
-            if parent_session and hasattr(parent_session, "coordinator"):
-                approval_system = getattr(parent_session.coordinator, "approval_system", None)
-                display_system = getattr(parent_session.coordinator, "display_system", None)
-                # Get working directory from parent - critical for file operations
-                parent_working_dir = parent_session.coordinator.get_capability(
-                    "session.working_dir"
+            # Define pre-execute hook for diagnostic events
+            async def foreman_pre_execute_hook(worker_session: Any) -> None:
+                """Emit diagnostic events before worker execution."""
+                await self._emit_diagnostic(
+                    "foreman:worker:session_created",
+                    {
+                        "issue_id": issue_id,
+                        "worker_session_id": worker_session.session_id,
+                        "parent_id": parent_session.session_id,
+                    },
                 )
 
-            # Create worker session with inherited working directory
-            # IMPORTANT: session_cwd must be passed at creation time, not after
-            # The session's project directory is determined at creation based on this
-            from pathlib import Path
+                # Register working directory capability
+                if parent_working_dir:
+                    worker_session.coordinator.register_capability(
+                        "session.working_dir", parent_working_dir
+                    )
+                    logger.info(f"Worker session using working_dir: {parent_working_dir}")
 
-            from amplifier_foundation import generate_sub_session_id
-
-            # Generate traceable session ID using W3C Trace Context pattern
-            # Format: {parent-span}-{child-span}_{agent-name}
-            # This creates a lineage chain visible in session listings
-            worker_session_id = generate_sub_session_id(
-                agent_name=f"worker-{issue_id[:8]}",
-                parent_session_id=parent_id,
-                parent_trace_id=getattr(parent_session, "trace_id", None)
-                if parent_session
-                else None,
-            )
-
-            worker_session = await prepared.create_session(
-                session_id=worker_session_id,
-                parent_id=parent_id,
-                approval_system=approval_system,
-                display_system=display_system,
-                session_cwd=Path(parent_working_dir) if parent_working_dir else None,
-            )
-
-            # Diagnostic: Session created
-            await self._emit_diagnostic(
-                "foreman:worker:session_created",
-                {
-                    "issue_id": issue_id,
-                    "worker_session_id": worker_session.session_id,
-                    "parent_id": parent_id,
-                },
-            )
-
-            # Also register the capability so tools can access it
-            if parent_working_dir:
-                worker_session.coordinator.register_capability(
-                    "session.working_dir", parent_working_dir
-                )
-                logger.info(f"Worker session using working_dir: {parent_working_dir}")
-
-            try:
-                # Diagnostic: Worker execution starting
                 await self._emit_diagnostic(
                     "foreman:worker:execution_starting",
-                    {"issue_id": issue_id, "worker_session_id": worker_session.session_id},
+                    {
+                        "issue_id": issue_id,
+                        "worker_session_id": worker_session.session_id,
+                    },
                 )
 
-                # Execute the worker instruction
-                logger.info(f"Executing worker for issue {issue_id}")
-                await worker_session.execute(worker_prompt)
-                logger.info(
-                    f"Worker completed for issue {issue_id}, session: {worker_session.session_id}"
-                )
+            # Spawn worker using foundation primitive
+            # spawn_bundle handles: bundle loading, provider inheritance, session
+            # creation, execution, persistence, and cleanup
+            logger.info(f"Spawning worker for issue {issue_id} from {worker_bundle_uri}")
 
-                # Diagnostic: Worker execution completed
-                await self._emit_diagnostic(
-                    "foreman:worker:execution_completed",
-                    {"issue_id": issue_id, "worker_session_id": worker_session.session_id},
-                )
+            result = await spawn_bundle(
+                bundle=worker_bundle_uri,
+                instruction=worker_prompt,
+                parent_session=parent_session,
+                # Inherit providers from parent (workers typically don't define their own)
+                inherit_providers=True,
+                inherit_tools=False,  # Workers use their own tools
+                inherit_hooks=False,  # Workers use their own hooks
+                # Session identity
+                session_name=f"worker-{issue_id[:8]}",
+                # Persistence with foreman-specific storage
+                session_storage=session_storage,
+                # Setup hook for diagnostics and working directory
+                pre_execute_hook=foreman_pre_execute_hook,
+                # Extra metadata for foreman tracking
+                metadata_extra={"issue_id": issue_id},
+            )
 
-                # Write worker session state (metadata.json, transcript.jsonl)
-                # This is normally done by CLI's SessionStore, but workers bypass that
-                await self._write_worker_session_state(
-                    worker_session=worker_session,
-                    bundle_name=bundle.name,
-                    issue_id=issue_id,
-                    working_dir=parent_working_dir,
-                )
-            finally:
-                # Always cleanup the worker session
-                await worker_session.cleanup()
+            logger.info(f"Worker completed for issue {issue_id}, session: {result.session_id}")
+
+            # Diagnostic: Worker execution completed
+            await self._emit_diagnostic(
+                "foreman:worker:execution_completed",
+                {"issue_id": issue_id, "worker_session_id": result.session_id},
+            )
+
+            # Diagnostic: Session state written (handled by spawn_bundle via storage)
+            await self._emit_diagnostic(
+                "foreman:worker:session_state_written",
+                {
+                    "issue_id": issue_id,
+                    "worker_session_id": result.session_id,
+                },
+            )
 
         except Exception as e:
             error = f"Worker execution failed for issue {issue_id}: {e}"

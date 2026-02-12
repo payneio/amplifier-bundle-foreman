@@ -4,10 +4,14 @@ version = "0.1.0"
 description = "Foreman orchestrator for Amplifier"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = ["amplifier-core"]
+dependencies = [
+    "amplifier-core",
+    "amplifier-bundle-orchestration",  # Optional but recommended for background sessions
+]
 
 [tool.uv.sources]
 amplifier-core = { git = "https://github.com/microsoft/amplifier-core", branch = "main" }
+amplifier-bundle-orchestration = { git = "https://github.com/microsoft/amplifier-bundle-orchestration", branch = "main" }
 
 [project.entry-points."amplifier.modules"]
 hooks-observations = "amplifier_module_orchestrator-foreman:mount"
