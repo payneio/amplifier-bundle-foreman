@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Foreman Bundle - Conversational Autonomous Work Orchestration</title>
+    <style>
+        :root {
+            --accent: #FF9500;
+            --accent-dim: rgba(255, 149, 0, 0.15);
+            --green: #30D158;
+            --blue: #0A84FF;
+            --red: #FF453A;
+            --purple: #BF5AF2;
+            --gray: rgba(255,255,255,0.5);
+            
+            /* Fluid typography */
+            --font-headline: clamp(36px, 8vw, 72px);
+            --font-medium: clamp(24px, 5vw, 48px);
+            --font-subhead: clamp(18px, 3vw, 32px);
+            --font-body: clamp(14px, 2vw, 20px);
+            --font-small: clamp(12px, 1.5vw, 16px);
+            --font-big-number: clamp(60px, 18vw, 160px);
+            
+            /* Fluid spacing */
+            --padding-slide: clamp(24px, 6vw, 80px);
+            --gap-grid: clamp(16px, 3vw, 40px);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+            background: #000;
+            color: #fff;
+            overflow: hidden;
+            overscroll-behavior: none;
+        }
+        
+        .deck {
+            height: 100vh;
+            height: 100dvh;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .slide {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            padding: var(--padding-slide);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.4s ease;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        
+        .slide.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        
+        .section-label {
+            font-size: var(--font-small);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--accent);
+            margin-bottom: 16px;
+        }
+        
+        .headline {
+            font-size: var(--font-headline);
+            font-weight: 700;
+            letter-spacing: -2px;
+            line-height: 1.05;
+            margin-bottom: 24px;
+        }
+        
+        .subhead {
+            font-size: var(--font-subhead);
+            font-weight: 400;
+            color: var(--gray);
+            line-height: 1.4;
+            max-width: 900px;
+        }
+        
+        .medium-headline {
+            font-size: var(--font-medium);
+            font-weight: 600;
+            letter-spacing: -1px;
+            line-height: 1.2;
+            margin-bottom: 40px;
+        }
+        
+        /* Grid layouts */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+            gap: var(--gap-grid);
+        }
+        
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+            gap: var(--gap-grid);
+        }
+        
+        .grid-4 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+            gap: var(--gap-grid);
+        }
+        
+        /* Cards */
+        .card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 16px;
+            padding: clamp(20px, 4vw, 32px);
+        }
+        
+        .card-icon {
+            font-size: clamp(28px, 5vw, 40px);
+            margin-bottom: 16px;
+        }
+        
+        .card-title {
+            font-size: var(--font-body);
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        
+        .card-desc {
+            font-size: var(--font-small);
+            color: var(--gray);
+            line-height: 1.5;
+        }
+        
+        /* Problem cards - red tint */
+        .card.problem {
+            border-color: rgba(255, 69, 58, 0.3);
+            background: rgba(255, 69, 58, 0.05);
+        }
+        
+        .card.problem .card-icon {
+            color: var(--red);
+        }
+        
+        /* Solution cards - green tint */
+        .card.solution {
+            border-color: rgba(48, 209, 88, 0.3);
+            background: rgba(48, 209, 88, 0.05);
+        }
+        
+        .card.solution .card-icon {
+            color: var(--green);
+        }
+        
+        /* Feature cards - accent tint */
+        .card.feature {
+            border-color: rgba(255, 149, 0, 0.3);
+            background: rgba(255, 149, 0, 0.05);
+        }
+        
+        .card.feature .card-icon {
+            color: var(--accent);
+        }
+        
+        /* Code blocks */
+        .code-block {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            padding: clamp(16px, 3vw, 24px);
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: clamp(11px, 1.8vw, 15px);
+            line-height: 1.7;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        
+        .code-block .user { color: var(--blue); }
+        .code-block .foreman { color: var(--accent); }
+        .code-block .status { color: var(--green); }
+        .code-block .dim { color: var(--gray); }
+        .code-block .emoji { margin-right: 4px; }
+        
+        /* Diagrams */
+        .diagram {
+            background: rgba(255,255,255,0.02);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 16px;
+            padding: clamp(24px, 5vw, 48px);
+            font-family: 'SF Mono', monospace;
+            font-size: clamp(10px, 1.5vw, 14px);
+            line-height: 1.5;
+            white-space: pre;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        
+        /* Flow steps */
+        .flow {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            align-items: center;
+            justify-content: center;
+            margin: 40px 0;
+        }
+        
+        .flow-step {
+            background: var(--accent-dim);
+            border: 1px solid var(--accent);
+            border-radius: 12px;
+            padding: 16px 24px;
+            text-align: center;
+            min-width: 140px;
+        }
+        
+        .flow-step-num {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent);
+            margin-bottom: 4px;
+        }
+        
+        .flow-step-text {
+            font-size: var(--font-small);
+            font-weight: 500;
+        }
+        
+        .flow-arrow {
+            color: var(--accent);
+            font-size: 24px;
+        }
+        
+        /* Stats grid */
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+            gap: var(--gap-grid);
+            text-align: center;
+        }
+        
+        .stat-number {
+            font-size: var(--font-big-number);
+            font-weight: 700;
+            letter-spacing: -4px;
+            background: linear-gradient(135deg, var(--accent) 0%, #FFD60A 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            line-height: 1;
+        }
+        
+        .stat-label {
+            font-size: var(--font-small);
+            color: var(--gray);
+            margin-top: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        /* Comparison table */
+        .comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 16px;
+            overflow: hidden;
+            margin-top: 32px;
+        }
+        
+        .comparison-header {
+            background: rgba(255,255,255,0.05);
+            padding: 20px;
+            font-weight: 600;
+            font-size: var(--font-body);
+            text-align: center;
+        }
+        
+        .comparison-header.before { color: var(--red); }
+        .comparison-header.after { color: var(--green); }
+        
+        .comparison-cell {
+            background: #000;
+            padding: 16px 20px;
+            font-size: var(--font-small);
+            line-height: 1.5;
+        }
+        
+        .comparison-cell.before { color: rgba(255,255,255,0.6); }
+        .comparison-cell.after { color: #fff; }
+        
+        @media (max-width: 600px) {
+            .comparison {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        /* Worker types */
+        .worker-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 16px;
+            padding: 24px;
+        }
+        
+        .worker-card .worker-name {
+            font-size: var(--font-body);
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .worker-card .worker-types {
+            font-size: 12px;
+            color: var(--accent);
+            margin-bottom: 12px;
+        }
+        
+        .worker-card .worker-tools {
+            font-size: var(--font-small);
+            color: var(--gray);
+        }
+        
+        /* Navigation */
+        .nav-dots {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 8px;
+            z-index: 100;
+        }
+        
+        .nav-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.2);
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .nav-dot.active {
+            background: var(--accent);
+            transform: scale(1.25);
+        }
+        
+        .slide-counter {
+            position: fixed;
+            bottom: 24px;
+            right: 32px;
+            font-size: 14px;
+            color: rgba(255,255,255,0.4);
+            font-family: 'SF Mono', monospace;
+            z-index: 100;
+        }
+        
+        /* Animations */
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .slide.active .animate {
+            animation: fadeInUp 0.6s ease forwards;
+        }
+        
+        .slide.active .animate-delay-1 { animation-delay: 0.1s; opacity: 0; }
+        .slide.active .animate-delay-2 { animation-delay: 0.2s; opacity: 0; }
+        .slide.active .animate-delay-3 { animation-delay: 0.3s; opacity: 0; }
+        .slide.active .animate-delay-4 { animation-delay: 0.4s; opacity: 0; }
+        
+        /* Centered content */
+        .centered {
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        /* Highlight text */
+        .highlight {
+            color: var(--accent);
+        }
+        
+        .highlight-green {
+            color: var(--green);
+        }
+        
+        /* Quote/emphasis */
+        .emphasis {
+            font-size: var(--font-subhead);
+            font-weight: 500;
+            font-style: italic;
+            color: rgba(255,255,255,0.8);
+            border-left: 3px solid var(--accent);
+            padding-left: 24px;
+            margin: 32px 0;
+        }
+        
+        /* Architecture box */
+        .arch-box {
+            background: rgba(255,255,255,0.03);
+            border: 2px solid var(--accent);
+            border-radius: 16px;
+            padding: 24px 32px;
+            text-align: center;
+            margin-bottom: 16px;
+        }
+        
+        .arch-box-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 8px;
+        }
+        
+        .arch-box-title {
+            font-size: var(--font-body);
+            font-weight: 600;
+        }
+        
+        .arch-arrow {
+            font-size: 24px;
+            color: var(--accent);
+            margin: 8px 0;
+        }
+        
+        .arch-workers {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin: 16px 0;
+        }
+        
+        .arch-worker {
+            background: rgba(48, 209, 88, 0.1);
+            border: 1px solid var(--green);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+        }
+        
+        .arch-worker-icon {
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+        
+        .arch-worker-name {
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .arch-queue {
+            background: rgba(10, 132, 255, 0.1);
+            border: 1px solid var(--blue);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+            margin-top: 16px;
+        }
+        
+        .arch-queue-label {
+            font-size: 12px;
+            color: var(--blue);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+        }
+        
+        .arch-queue-title {
+            font-size: var(--font-body);
+            font-weight: 500;
+        }
+        
+        @media (max-width: 600px) {
+            .arch-workers {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        /* CTA */
+        .cta-link {
+            display: inline-block;
+            background: var(--accent);
+            color: #000;
+            padding: 16px 32px;
+            border-radius: 12px;
+            font-weight: 600;
+            text-decoration: none;
+            margin-top: 32px;
+            transition: transform 0.2s ease;
+        }
+        
+        .cta-link:hover {
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+    <div class="deck">
+        <!-- Slide 1: Title -->
+        <div class="slide active centered">
+            <div class="section-label animate">Amplifier Ecosystem</div>
+            <h1 class="headline animate animate-delay-1">The Foreman Bundle</h1>
+            <p class="subhead animate animate-delay-2">Conversational Autonomous Work Orchestration</p>
+            <p class="animate animate-delay-3" style="margin-top: 48px; color: var(--gray); font-size: var(--font-small);">
+                Think of a foreman on a construction site: delegates, coordinates, reports progress.
+            </p>
+        </div>
+
+        <!-- Slide 2: The Problem -->
+        <div class="slide">
+            <div class="section-label animate">The Problem</div>
+            <h2 class="medium-headline animate animate-delay-1">Traditional AI agents have a <span class="highlight">single-agent bottleneck</span></h2>
+            <div class="grid-2 animate animate-delay-2">
+                <div class="card problem">
+                    <div class="card-icon">⏳</div>
+                    <div class="card-title">Blocking Execution</div>
+                    <div class="card-desc">User waits while the agent does all work sequentially. Long tasks mean long waits.</div>
+                </div>
+                <div class="card problem">
+                    <div class="card-icon">🧠</div>
+                    <div class="card-title">Context Exhaustion</div>
+                    <div class="card-desc">Long tasks consume the entire context window. Agent forgets earlier work.</div>
+                </div>
+                <div class="card problem">
+                    <div class="card-icon">📏</div>
+                    <div class="card-title">No Parallelism</div>
+                    <div class="card-desc">Tasks execute one at a time. Can't work on multiple files simultaneously.</div>
+                </div>
+                <div class="card problem">
+                    <div class="card-icon">🔧</div>
+                    <div class="card-title">No Specialization</div>
+                    <div class="card-desc">One agent handles everything. Jack of all trades, master of none.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 3: The Solution -->
+        <div class="slide">
+            <div class="section-label animate">The Solution</div>
+            <h2 class="medium-headline animate animate-delay-1">Separate <span class="highlight">coordination</span> from <span class="highlight-green">execution</span></h2>
+            <div class="grid-2 animate animate-delay-2">
+                <div class="arch-box">
+                    <div class="arch-box-label">Coordinator</div>
+                    <div class="arch-box-title">Foreman</div>
+                    <p style="margin-top: 12px; font-size: var(--font-small); color: var(--gray);">
+                        Understands intent • Breaks down work • Routes issues • Reports progress • Returns <strong>quickly</strong>
+                    </p>
+                </div>
+                <div style="background: rgba(48,209,88,0.05); border: 2px solid var(--green); border-radius: 16px; padding: 24px 32px; text-align: center;">
+                    <div style="font-size: 12px; font-weight: 600; color: var(--green); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px;">Executors</div>
+                    <div style="font-size: var(--font-body); font-weight: 600;">Workers</div>
+                    <p style="margin-top: 12px; font-size: var(--font-small); color: var(--gray);">
+                        Specialized tools • Focused context • Run in parallel • Update queue when done
+                    </p>
+                </div>
+            </div>
+            <p class="emphasis animate animate-delay-3">
+                "The foreman doesn't swing hammers. The foreman makes sure the right people are swinging hammers at the right things."
+            </p>
+        </div>
+
+        <!-- Slide 4: How It Works -->
+        <div class="slide">
+            <div class="section-label animate">How It Works</div>
+            <h2 class="medium-headline animate animate-delay-1">Fire-and-forget worker spawning</h2>
+            <div class="flow animate animate-delay-2">
+                <div class="flow-step">
+                    <div class="flow-step-num">1</div>
+                    <div class="flow-step-text">User Request</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-num">2</div>
+                    <div class="flow-step-text">Create Issues</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-num">3</div>
+                    <div class="flow-step-text">Spawn Workers</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-num">4</div>
+                    <div class="flow-step-text">Return Quickly</div>
+                </div>
+            </div>
+            <div class="diagram animate animate-delay-3" style="max-width: 700px; margin: 0 auto;">
+Workers run in background
+        │
+        ├─→ <span style="color: var(--green);">Worker 1</span>: Implement feature ─→ ✅ completed
+        │
+        ├─→ <span style="color: var(--green);">Worker 2</span>: Write tests ────→ ⏳ in_progress
+        │
+        └─→ <span style="color: var(--green);">Worker 3</span>: Update docs ────→ ⏳ in_progress
+        │
+        ▼
+<span style="color: var(--blue);">Issue Queue</span> (shared state)
+        │
+        ▼
+Foreman checks queue on next turn → Reports progress</div>
+        </div>
+
+        <!-- Slide 5: User Experience -->
+        <div class="slide">
+            <div class="section-label animate">User Experience</div>
+            <h2 class="medium-headline animate animate-delay-1">Conversational, not blocking</h2>
+            <div class="code-block animate animate-delay-2" style="max-width: 800px;">
+<span class="user">User:</span> "Refactor the authentication system"
+
+<span class="foreman">Foreman:</span> <span class="emoji">📋</span> Analyzing work request...
+
+         Created 5 issues:
+           • Issue #1: Split auth.py into modules
+           • Issue #2: Update imports across codebase
+           • Issue #3: Update unit tests
+           • Issue #4: Add integration tests
+           • Issue #5: Update documentation
+
+         <span class="emoji">🚀</span> Spawned 5 workers. I'll keep you posted!
+
+<span class="dim">[Workers run in background as separate sessions]</span>
+
+<span class="user">User:</span> "Also add rate limiting"
+
+<span class="foreman">Foreman:</span> <span class="status">✅ Completed (2):</span>
+           • Split auth.py into modules
+           • Update unit tests
+
+         <span class="emoji">📋</span> Created 2 more issues for rate limiting.
+         <span class="emoji">🚀</span> Spawned 2 workers.
+
+<span class="user">User:</span> "status"
+
+<span class="foreman">Foreman:</span> <span class="status">✅ Completed (5)</span> | <span style="color: var(--accent);">⏳ In Progress (2)</span>
+         All clear - no blockers!</div>
+        </div>
+
+        <!-- Slide 6: Key Features -->
+        <div class="slide">
+            <div class="section-label animate">Key Features</div>
+            <h2 class="medium-headline animate animate-delay-1">Built for real-world workflows</h2>
+            <div class="grid-3 animate animate-delay-2">
+                <div class="card feature">
+                    <div class="card-icon">📡</div>
+                    <div class="card-title">Proactive Reporting</div>
+                    <div class="card-desc">Foreman checks queue every turn and reports completions and blockers automatically.</div>
+                </div>
+                <div class="card feature">
+                    <div class="card-icon">🎯</div>
+                    <div class="card-title">Intelligent Routing</div>
+                    <div class="card-desc">Issues routed to appropriate worker pools based on type. Coding tasks → coding workers.</div>
+                </div>
+                <div class="card feature">
+                    <div class="card-icon">🔥</div>
+                    <div class="card-title">Fire-and-Forget</div>
+                    <div class="card-desc">Foreman spawns workers and returns immediately. No waiting, no blocking.</div>
+                </div>
+                <div class="card feature">
+                    <div class="card-icon">🔄</div>
+                    <div class="card-title">Recovery</div>
+                    <div class="card-desc">Detects orphaned issues from crashed sessions and reports them for re-spawning.</div>
+                </div>
+                <div class="card feature">
+                    <div class="card-icon">🔒</div>
+                    <div class="card-title">Security Boundaries</div>
+                    <div class="card-desc">Workers have restricted tool access. Coding workers can't browse web. Research workers can't edit code.</div>
+                </div>
+                <div class="card feature">
+                    <div class="card-icon">💬</div>
+                    <div class="card-title">Conversational</div>
+                    <div class="card-desc">Add work anytime. Ask for status anytime. Treat foreman like a team member.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 7: Architecture -->
+        <div class="slide">
+            <div class="section-label animate">Architecture</div>
+            <h2 class="medium-headline animate animate-delay-1">Issue queue as coordination primitive</h2>
+            <div style="max-width: 700px; margin: 0 auto;" class="animate animate-delay-2">
+                <div class="arch-box">
+                    <div class="arch-box-label">Foreman Session</div>
+                    <div class="arch-box-title">Conversational Orchestrator</div>
+                </div>
+                <div class="arch-arrow">↓ spawns via load_bundle()</div>
+                <div class="arch-workers">
+                    <div class="arch-worker">
+                        <div class="arch-worker-icon">💻</div>
+                        <div class="arch-worker-name">Coding Worker</div>
+                    </div>
+                    <div class="arch-worker">
+                        <div class="arch-worker-icon">🔍</div>
+                        <div class="arch-worker-name">Research Worker</div>
+                    </div>
+                    <div class="arch-worker">
+                        <div class="arch-worker-icon">🧪</div>
+                        <div class="arch-worker-name">Testing Worker</div>
+                    </div>
+                </div>
+                <div class="arch-arrow">↓ update status</div>
+                <div class="arch-queue">
+                    <div class="arch-queue-label">Shared State</div>
+                    <div class="arch-queue-title">Issue Queue</div>
+                    <div style="margin-top: 8px; font-size: 12px; color: var(--gray);">
+                        open → in_progress → completed | blocked | pending_user_input
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 8: Worker Specialization -->
+        <div class="slide">
+            <div class="section-label animate">Worker Bundles</div>
+            <h2 class="medium-headline animate animate-delay-1">Specialized workers, right tools for the job</h2>
+            <div class="grid-3 animate animate-delay-2">
+                <div class="worker-card">
+                    <div class="worker-name">💻 Coding Worker</div>
+                    <div class="worker-types">task • feature • bug • refactor</div>
+                    <div class="worker-tools">
+                        <strong>Tools:</strong> read_file, write_file, edit_file, bash, python_check, grep, glob
+                    </div>
+                </div>
+                <div class="worker-card">
+                    <div class="worker-name">🔍 Research Worker</div>
+                    <div class="worker-types">epic • research • analysis</div>
+                    <div class="worker-tools">
+                        <strong>Tools:</strong> web_search, web_fetch, read_file, write_file (docs only)
+                    </div>
+                </div>
+                <div class="worker-card">
+                    <div class="worker-name">🧪 Testing Worker</div>
+                    <div class="worker-types">chore • testing • qa</div>
+                    <div class="worker-tools">
+                        <strong>Tools:</strong> bash (test execution), read_file, python_check
+                    </div>
+                </div>
+            </div>
+            <p class="emphasis animate animate-delay-3">
+                Workers are self-contained bundles: tools + instructions + security boundaries. Version them independently.
+            </p>
+        </div>
+
+        <!-- Slide 9: Comparison -->
+        <div class="slide">
+            <div class="section-label animate">Impact</div>
+            <h2 class="medium-headline animate animate-delay-1">Before vs. After</h2>
+            <div class="comparison animate animate-delay-2">
+                <div class="comparison-header before">❌ Traditional Agent</div>
+                <div class="comparison-header after">✅ Foreman Pattern</div>
+                
+                <div class="comparison-cell before">User waits for all work to complete</div>
+                <div class="comparison-cell after">Sub-second responses, work continues in background</div>
+                
+                <div class="comparison-cell before">Context exhausted on long tasks</div>
+                <div class="comparison-cell after">Fresh context per worker, foreman stays lightweight</div>
+                
+                <div class="comparison-cell before">Sequential file-by-file execution</div>
+                <div class="comparison-cell after">Parallel workers on independent issues</div>
+                
+                <div class="comparison-cell before">One agent does everything</div>
+                <div class="comparison-cell after">Specialized workers with focused capabilities</div>
+                
+                <div class="comparison-cell before">Can't add work mid-task</div>
+                <div class="comparison-cell after">Add work anytime, ask status anytime</div>
+                
+                <div class="comparison-cell before">No visibility into progress</div>
+                <div class="comparison-cell after">Proactive updates on every turn</div>
+            </div>
+        </div>
+
+        <!-- Slide 10: Built on Amplifier -->
+        <div class="slide">
+            <div class="section-label animate">Philosophy</div>
+            <h2 class="medium-headline animate animate-delay-1">Built on Amplifier's primitives</h2>
+            <div class="grid-2 animate animate-delay-2">
+                <div class="card">
+                    <div class="card-title" style="color: var(--accent); margin-bottom: 16px;">Uses Foundation APIs</div>
+                    <div class="code-block" style="font-size: 13px;">
+<span style="color: var(--green);"># Load worker bundle</span>
+bundle = await load_bundle(worker_url)
+
+<span style="color: var(--green);"># Create session</span>
+session = await prepared.create_session()
+
+<span style="color: var(--green);"># Execute (fire-and-forget)</span>
+asyncio.create_task(session.execute(prompt))</div>
+                </div>
+                <div class="card">
+                    <div class="card-title" style="color: var(--green); margin-bottom: 16px;">No Core Modifications</div>
+                    <ul style="font-size: var(--font-small); color: var(--gray); line-height: 2; list-style: none;">
+                        <li>✓ Standard orchestrator contract</li>
+                        <li>✓ Uses load_bundle() from foundation</li>
+                        <li>✓ Workers are regular bundles</li>
+                        <li>✓ Issue queue is a standard tool</li>
+                        <li>✓ No kernel patches required</li>
+                    </ul>
+                </div>
+            </div>
+            <p class="emphasis animate animate-delay-3">
+                "Mechanism, not policy" — Amplifier provides the primitives, Foreman implements the pattern.
+            </p>
+        </div>
+
+        <!-- Slide 11: Stats -->
+        <div class="slide centered">
+            <div class="section-label animate">By the Numbers</div>
+            <div class="stats animate animate-delay-1" style="margin-top: 40px;">
+                <div>
+                    <div class="stat-number">5</div>
+                    <div class="stat-label">Worker Types</div>
+                </div>
+                <div>
+                    <div class="stat-number">∞</div>
+                    <div class="stat-label">Parallel Workers</div>
+                </div>
+                <div>
+                    <div class="stat-number">&lt;1s</div>
+                    <div class="stat-label">Response Time</div>
+                </div>
+            </div>
+            <p class="subhead animate animate-delay-2" style="margin-top: 60px;">
+                Add work anytime. Get updates automatically. Never wait for sequential execution again.
+            </p>
+        </div>
+
+        <!-- Slide 12: CTA -->
+        <div class="slide centered">
+            <div class="section-label animate">Get Started</div>
+            <h2 class="headline animate animate-delay-1">Try the Foreman</h2>
+            <p class="subhead animate animate-delay-2">
+                Clone the bundle, configure your worker pools, and start delegating.
+            </p>
+            <div class="code-block animate animate-delay-3" style="max-width: 600px; margin-top: 40px; text-align: left;">
+<span style="color: var(--gray);"># Clone the foreman bundle</span>
+git clone https://github.com/payneio/amplifier-bundle-foreman
+
+<span style="color: var(--gray);"># Run with Amplifier</span>
+amp --bundle ./amplifier-bundle-foreman
+
+<span style="color: var(--gray);"># Start delegating!</span>
+> "Refactor the auth system into modules"</div>
+            <p class="animate animate-delay-4" style="margin-top: 48px; color: var(--gray); font-size: var(--font-small);">
+                github.com/payneio/amplifier-bundle-foreman
+            </p>
+        </div>
+    </div>
+
+    <!-- Navigation -->
+    <div class="nav-dots"></div>
+    <div class="slide-counter"></div>
+
+    <script>
+        const slides = document.querySelectorAll('.slide');
+        const navDots = document.querySelector('.nav-dots');
+        const counter = document.querySelector('.slide-counter');
+        let currentSlide = 0;
+
+        // Create nav dots
+        slides.forEach((_, i) => {
+            const dot = document.createElement('div');
+            dot.className = 'nav-dot' + (i === 0 ? ' active' : '');
+            dot.addEventListener('click', () => goToSlide(i));
+            navDots.appendChild(dot);
+        });
+
+        function updateCounter() {
+            counter.textContent = `${currentSlide + 1} / ${slides.length}`;
+        }
+
+        function goToSlide(n) {
+            slides[currentSlide].classList.remove('active');
+            navDots.children[currentSlide].classList.remove('active');
+            
+            currentSlide = (n + slides.length) % slides.length;
+            
+            slides[currentSlide].classList.add('active');
+            navDots.children[currentSlide].classList.add('active');
+            updateCounter();
+        }
+
+        function nextSlide() {
+            goToSlide(currentSlide + 1);
+        }
+
+        function prevSlide() {
+            goToSlide(currentSlide - 1);
+        }
+
+        // Keyboard navigation
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowRight' || e.key === ' ') {
+                e.preventDefault();
+                nextSlide();
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                prevSlide();
+            }
+        });
+
+        // Click navigation
+        document.addEventListener('click', (e) => {
+            if (e.target.closest('.nav-dot')) return;
+            const x = e.clientX;
+            const width = window.innerWidth;
+            if (x > width * 0.6) {
+                nextSlide();
+            } else if (x < width * 0.4) {
+                prevSlide();
+            }
+        });
+
+        // Touch navigation
+        let touchStartX = 0;
+        document.addEventListener('touchstart', (e) => {
+            touchStartX = e.touches[0].clientX;
+        });
+
+        document.addEventListener('touchend', (e) => {
+            const touchEndX = e.changedTouches[0].clientX;
+            const diff = touchStartX - touchEndX;
+            if (Math.abs(diff) > 50) {
+                if (diff > 0) {
+                    nextSlide();
+                } else {
+                    prevSlide();
+                }
+            }
+        });
+
+        updateCounter();
+    </script>
+</body>
+</html>
