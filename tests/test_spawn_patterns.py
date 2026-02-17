@@ -421,7 +421,7 @@ class TestSpawnBundleImplementation:
 
         # Patch at source since it's imported inside the method
         with patch(
-            "amplifier_foundation.spawn.spawn_bundle",
+            "amplifier_orchestration.spawn.spawn_bundle",
             new_callable=AsyncMock,
             return_value=mock_result,
         ):
@@ -472,7 +472,7 @@ class TestSpawnBundleImplementation:
 
         # Mock spawn_bundle to raise an error
         with patch(
-            "amplifier_foundation.spawn.spawn_bundle",
+            "amplifier_orchestration.spawn.spawn_bundle",
             new_callable=AsyncMock,
             side_effect=RuntimeError("Bundle not found"),
         ):
@@ -676,7 +676,7 @@ class TestEndToEndSpawnFlow:
         mock_result.output = "Worker completed"
 
         with patch(
-            "amplifier_foundation.spawn.spawn_bundle",
+            "amplifier_orchestration.spawn.spawn_bundle",
             new_callable=AsyncMock,
             return_value=mock_result,
         ):
@@ -735,7 +735,7 @@ class TestEndToEndSpawnFlow:
         mock_result.output = "Worker completed"
 
         with patch(
-            "amplifier_foundation.spawn.spawn_bundle",
+            "amplifier_orchestration.spawn.spawn_bundle",
             new_callable=AsyncMock,
             return_value=mock_result,
         ):

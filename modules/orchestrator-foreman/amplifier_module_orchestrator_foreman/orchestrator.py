@@ -943,7 +943,7 @@ When done, update the issue with your results:
             worker_prompt: Instruction prompt for the worker
             issue_id: Issue ID for logging and error tracking
         """
-        from amplifier_foundation.spawn import spawn_bundle
+        from amplifier_orchestration.spawn import spawn_bundle
 
         # Diagnostic: Task started executing
         await self._emit_diagnostic(
